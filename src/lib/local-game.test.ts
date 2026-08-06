@@ -108,6 +108,24 @@ test("chaal automatically advances the centre card and turn", () => {
   assert.notEqual(getCurrentPlayer(next).id, player.id);
 });
 
+test("an unpaid chaal is recorded as a player short balance", () => {
+  const table = createLocalTable({
+    roomCode: "123",
+    userName: "Vivaan",
+    botNames: ["Kabir"],
+    seed: 8,
+  });
+  const player = getCurrentPlayer(table);
+  const playerIndex = table.players.findIndex((candidate) => candidate.id === player.id);
+  table.players[playerIndex] = { ...player, chips: 0 };
+
+  const next = playChaal(table, player.id);
+  const chargedPlayer = next.players.find((candidate) => candidate.id === player.id);
+
+  assert.equal(chargedPlayer?.shortChips, AFLATOON_RULES.fixedChaalChips);
+  assert.equal(next.pot, table.pot + AFLATOON_RULES.fixedChaalChips);
+});
+
 test("turns visit every active seat exactly once for two through five players", () => {
   for (let playerCount = 2; playerCount <= 5; playerCount += 1) {
     let table = createLocalTable({

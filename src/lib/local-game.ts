@@ -1016,7 +1016,6 @@ function awardPot(state: TableState, winnerIds: string[], reason: string): Table
 
     if (winner) {
       winner.chips += share;
-      winner.shortChips = 0;
       winner.status = "active";
     }
   }

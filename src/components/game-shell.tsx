@@ -126,6 +126,11 @@ type IncomingChipRequest = {
   amount: number;
 };
 
+type ShortfallPrompt = {
+  key: string;
+  chips: number;
+};
+
 type NormalBotRequestStage = "idle" | "personal-pending" | "personal-approved" | "buy-in-pending" | "done";
 
 type ChipMotion = {
@@ -220,6 +225,7 @@ export function GameShell() {
   const [chipMotion, setChipMotion] = useState<ChipMotion | null>(null);
   const [testRoomScenario, setTestRoomScenario] = useState<TestRoomScenario>(null);
   const [incomingChipRequest, setIncomingChipRequest] = useState<IncomingChipRequest | null>(null);
+  const [shortfallPrompt, setShortfallPrompt] = useState<ShortfallPrompt | null>(null);
   const [onlineUserId, setOnlineUserId] = useState<string | null>(null);
   const [joinPending, setJoinPending] = useState(false);
   const [lobbyPending, setLobbyPending] = useState(false);
@@ -261,6 +267,7 @@ export function GameShell() {
   const pendingActionRevisionRef = useRef<number | null>(null);
   const announcedBuyInRequestIdsRef = useRef(new Set<string>());
   const announcedTransferRequestIdsRef = useRef(new Set<string>());
+  const handledShortfallKeysRef = useRef(new Set<string>());
 
   useEffect(() => {
     const savedSession = readActiveRoomSession();
@@ -315,6 +322,31 @@ export function GameShell() {
   useEffect(() => {
     tableRef.current = table;
   }, [table]);
+
+  useEffect(() => {
+    const player = table?.players.find((candidate) => candidate.id === table.userId);
+
+    if (
+      !table ||
+      table.phase !== "playing" ||
+      !player ||
+      player.shortChips <= 0 ||
+      pendingShow ||
+      pendingFold ||
+      sessionEnded
+    ) {
+      return;
+    }
+
+    const key = `${table.handNumber}:${table.actionCount}:${player.shortChips}`;
+
+    if (handledShortfallKeysRef.current.has(key)) {
+      return;
+    }
+
+    handledShortfallKeysRef.current.add(key);
+    setShortfallPrompt({ key, chips: player.shortChips });
+  }, [pendingFold, pendingShow, sessionEnded, table]);
 
   const showOverlay = useCallback((text: string, tone: Overlay["tone"]) => {
     setOverlay({ text, tone });
@@ -2096,6 +2128,19 @@ export function GameShell() {
         onChange={setTransferDraft}
         onSubmit={submitTransferRequest}
       />
+      <ShortfallModal
+        chips={shortfallPrompt?.chips ?? 0}
+        open={Boolean(shortfallPrompt)}
+        onContinueShort={() => setShortfallPrompt(null)}
+        onNewBuyIn={(chips) => {
+          setShortfallPrompt(null);
+          requestChips(chips);
+        }}
+        onRequestPlayers={() => {
+          setShortfallPrompt(null);
+          openTransferRequest();
+        }}
+      />
     </main>
   );
 }
@@ -3327,6 +3372,67 @@ function PlayingCard({
   );
 }
 
+function ShortfallModal({
+  chips,
+  onContinueShort,
+  onNewBuyIn,
+  onRequestPlayers,
+  open,
+}: {
+  chips: number;
+  onContinueShort: () => void;
+  onNewBuyIn: (chips: 10 | 20) => void;
+  onRequestPlayers: () => void;
+  open: boolean;
+}) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop fixed inset-0 z-[70] grid place-items-center px-4">
+      <section className="modal-surface w-full max-w-sm p-5">
+        <p className="text-xs font-bold uppercase text-[#f5d77d]">Short balance</p>
+        <h2 className="mt-1 text-2xl font-black text-white">You are short {chips} chip{chips === 1 ? "" : "s"}</h2>
+        <p className="mt-2 text-sm text-white/65">
+          Choose how you want to continue. Any unpaid short amount stays separately visible in the session tally.
+        </p>
+        <button
+          className="secondary-action mt-5 flex h-12 w-full items-center justify-center gap-2 px-4 text-sm font-bold"
+          type="button"
+          onClick={onRequestPlayers}
+        >
+          <ArrowRightLeft size={18} />
+          Request Chips From Players
+        </button>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            className="primary-action flex h-12 items-center justify-center px-3 text-sm font-black"
+            type="button"
+            onClick={() => onNewBuyIn(10)}
+          >
+            New Buy-in: 10
+          </button>
+          <button
+            className="primary-action flex h-12 items-center justify-center px-3 text-sm font-black"
+            type="button"
+            onClick={() => onNewBuyIn(20)}
+          >
+            New Buy-in: 20
+          </button>
+        </div>
+        <button
+          className="mt-2 h-11 w-full text-sm font-semibold text-white/60 transition hover:text-white"
+          type="button"
+          onClick={onContinueShort}
+        >
+          Continue On Short
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function TransferRequestModal({
   draft,
   onCancel,
@@ -3463,6 +3569,12 @@ function SessionTallyModal({
   const transferLines = transferObligations.map((settlement) =>
     settlementSentence(settlement, playerNames),
   );
+  const shortLines = rows
+    .filter((row) => row.shortChips > 0)
+    .map(
+      (row) =>
+        `${row.name} is short ${row.shortChips} chips (Rs ${formatRupees(rupeesForChips(row.shortChips))}).`,
+    );
 
   function downloadTally() {
     const playerRows = rows
@@ -3483,9 +3595,12 @@ function SessionTallyModal({
     const transferItems = transferLines.length
       ? transferLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")
       : "<li>No personal chip requests remain to settle.</li>";
+    const shortItems = shortLines.length
+      ? shortLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")
+      : "<li>No player finished short.</li>";
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>North Tash Session Tally</title><style>
       body{font-family:Arial,sans-serif;background:#f4f1e8;color:#172117;padding:32px;line-height:1.4}main{max-width:820px;margin:auto;background:#fff;padding:28px;border:1px solid #d9cda9}h1{margin:0 0 4px;color:#244b36}h2{margin-top:28px;color:#244b36}p{color:#596158}table{border-collapse:collapse;width:100%;margin-top:16px}th{background:#244b36;color:white;text-align:left}th,td{border:1px solid #d9ded7;padding:10px;vertical-align:top}tr:nth-child(even){background:#f6f8f4}small{color:#69736a}.positive{color:#13733b;font-weight:bold}.negative{color:#a42e35;font-weight:bold}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.summary div,li{border:1px solid #d9ded7;padding:12px;background:#f6f8f4}.summary strong{display:block;font-size:20px}ul{list-style:none;padding:0;display:grid;gap:8px}@media(max-width:700px){body{padding:12px}.summary{grid-template-columns:1fr}table{font-size:12px}th,td{padding:6px}}
-    </style></head><body><main><h1>North Tash - Session Tally</h1><p>Final player balances and clear payment instructions.</p><div class="summary"><div>Total buy-in<strong>${totalBuyInChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(totalBuyInChips))}</small></div><div>Closing stacks<strong>${totalClosingChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(totalClosingChips))}</small></div><div>Table pot<strong>${potChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(potChips))}</small></div></div><h2>Who pays whom</h2><ul>${settlementItems}</ul><h2>Personal chip requests</h2><ul>${transferItems}</ul><h2>Player balances</h2><table><thead><tr><th>Player</th><th>Buy-in</th><th>Closing stack</th><th>Game balance</th></tr></thead><tbody>${playerRows}</tbody></table>${potChips > 0 ? `<p><strong>Rs ${formatRupees(rupeesForChips(potChips))} remains in the table pot.</strong> Finish the hand for an exact player settlement.</p>` : ""}</main></body></html>`;
+    </style></head><body><main><h1>North Tash - Session Tally</h1><p>Final player balances and clear payment instructions.</p><div class="summary"><div>Total buy-in<strong>${totalBuyInChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(totalBuyInChips))}</small></div><div>Closing stacks<strong>${totalClosingChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(totalClosingChips))}</small></div><div>Table pot<strong>${potChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(potChips))}</small></div></div><h2>Who pays whom</h2><ul>${settlementItems}</ul><h2>Personal chip requests</h2><ul>${transferItems}</ul><h2>Short balances</h2><ul>${shortItems}</ul><h2>Player balances</h2><table><thead><tr><th>Player</th><th>Buy-in</th><th>Closing stack</th><th>Game balance</th></tr></thead><tbody>${playerRows}</tbody></table>${potChips > 0 ? `<p><strong>Rs ${formatRupees(rupeesForChips(potChips))} remains in the table pot.</strong> Finish the hand for an exact player settlement.</p>` : ""}</main></body></html>`;
     const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -3538,6 +3653,17 @@ function SessionTallyModal({
           </div>
         ) : null}
 
+        <div className="mt-3 rounded-md border border-[#e2b653]/30 bg-[#e2b653]/8 p-3">
+          <p className="text-xs font-bold uppercase text-[#e2b653]">Short balances</p>
+          <div className="mt-2 space-y-1">
+            {shortLines.length ? shortLines.map((line) => (
+              <p className="text-sm font-semibold text-[#ffe7ad]" key={line}>{line}</p>
+            )) : (
+              <p className="text-sm text-white/60">No player finished short.</p>
+            )}
+          </div>
+        </div>
+
         <div className="mt-3 space-y-2">
           {rows.map((row) => (
             <div
@@ -3549,6 +3675,11 @@ function SessionTallyModal({
                 <p className="text-xs text-white/50">
                   Buy-in Rs {formatRupees(row.buyInRupees)} · Closing Rs {formatRupees(row.closingRupees)}
                 </p>
+                {row.shortChips > 0 ? (
+                  <p className="mt-1 text-xs font-semibold text-[#ffe7ad]">
+                    Short: {row.shortChips} chips · Rs {formatRupees(rupeesForChips(row.shortChips))}
+                  </p>
+                ) : null}
               </div>
               <div className="text-right">
                 <p className={`font-black ${row.netChips >= 0 ? "text-[#8ce0a6]" : "text-[#ffaaaa]"}`}>
