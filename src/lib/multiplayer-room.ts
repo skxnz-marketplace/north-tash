@@ -7,6 +7,23 @@ export type MultiplayerSnapshot = {
   table: Record<string, unknown> | null;
 };
 
+export type GameAction = {
+  id?: string;
+  actionType: string;
+  payload: Record<string, unknown>;
+  baseRevision: number;
+  actorUserId?: string;
+  createdAt?: string;
+};
+
+export type PrivateReveal = {
+  requestId: string;
+  viewerUserId: string;
+  playerId: string;
+  hand: unknown[];
+  expiresAt: number;
+};
+
 type RoomRow = {
   code: string;
   host_user_id: string;
@@ -174,6 +191,202 @@ export async function saveMultiplayerSnapshot(code: string, snapshot: Multiplaye
   if (error) {
     throw error;
   }
+}
+
+export async function submitGameAction(
+  code: string,
+  actorUserId: string,
+  action: Omit<GameAction, "actorUserId">,
+) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    throw new Error("Online multiplayer is unavailable.");
+  }
+
+  const { data, error } = await supabase
+    .from("game_room_actions")
+    .insert({
+      room_code: code,
+      actor_user_id: actorUserId,
+      action_type: action.actionType,
+      payload: action.payload,
+      base_revision: action.baseRevision,
+    })
+    .select("id, action_type, payload, base_revision, actor_user_id, created_at")
+    .single<GameAction>();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+export async function listPendingGameActions(code: string) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("game_room_actions")
+    .select("id, action_type, payload, base_revision, actor_user_id, created_at")
+    .eq("room_code", code)
+    .is("processed_at", null)
+    .order("created_at", { ascending: true })
+    .limit(20)
+    .returns<GameAction[]>();
+
+  if (error) {
+    throw error;
+  }
+
+  return data ?? [];
+}
+
+export async function markGameActionProcessed(id: string, result: Record<string, unknown>) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return;
+  }
+
+  const { error } = await supabase
+    .from("game_room_actions")
+    .update({ processed_at: new Date().toISOString(), result })
+    .eq("id", id);
+
+  if (error) {
+    throw error;
+  }
+}
+
+export async function savePrivateHands(
+  code: string,
+  players: Array<{ id: string; hand: unknown[] }>,
+) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return;
+  }
+
+  const rows = players.map((player) => ({
+    room_code: code,
+    user_id: player.id.replace(/^p-/, ""),
+    player_id: player.id,
+    hand: player.hand,
+  }));
+  const { error } = await supabase.from("game_room_private_hands").upsert(rows, {
+    onConflict: "room_code,user_id",
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+export async function loadPrivateHand(code: string, userId: string) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("game_room_private_hands")
+    .select("hand")
+    .eq("room_code", code)
+    .eq("user_id", userId)
+    .maybeSingle<{ hand: unknown[] }>();
+
+  if (error) {
+    throw error;
+  }
+
+  return data?.hand ?? [];
+}
+
+export async function createPrivateReveals(
+  code: string,
+  requestId: string,
+  viewers: Array<{ userId: string; playerId: string; hand: unknown[] }>,
+) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return;
+  }
+
+  const expiresAt = new Date(Date.now() + 2800).toISOString();
+  const { error } = await supabase.from("game_room_reveals").upsert(
+    viewers.map((viewer) => ({
+      room_code: code,
+      request_id: requestId,
+      viewer_user_id: viewer.userId,
+      player_id: viewer.playerId,
+      hand: viewer.hand,
+      expires_at: expiresAt,
+    })),
+    { onConflict: "room_code,request_id,viewer_user_id,player_id" },
+  );
+
+  if (error) {
+    throw error;
+  }
+}
+
+export async function loadPrivateReveals(code: string, userId: string) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("game_room_reveals")
+    .select("request_id, viewer_user_id, player_id, hand, expires_at")
+    .eq("room_code", code)
+    .eq("viewer_user_id", userId)
+    .gt("expires_at", new Date().toISOString())
+    .returns<Array<{ request_id: string; viewer_user_id: string; player_id: string; hand: unknown[]; expires_at: string }>>();
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? []).map((row) => ({
+    requestId: row.request_id,
+    viewerUserId: row.viewer_user_id,
+    playerId: row.player_id,
+    hand: row.hand,
+    expiresAt: Date.parse(row.expires_at),
+  }));
+}
+
+export function stripPrivateHands(snapshot: MultiplayerSnapshot): MultiplayerSnapshot {
+  const table = snapshot.table as {
+    players?: Array<Record<string, unknown>>;
+    userId?: string;
+    pendingShow?: Record<string, unknown>;
+    privateReveal?: Record<string, unknown>;
+  } | null;
+
+  if (!table) {
+    return snapshot;
+  }
+
+  return {
+    ...snapshot,
+    table: {
+      ...table,
+      userId: "",
+      players: (table.players ?? []).map((player) => ({ ...player, hand: [] })),
+      privateReveal: undefined,
+    },
+  };
 }
 
 export async function touchMultiplayerMembership(code: string, userId: string) {

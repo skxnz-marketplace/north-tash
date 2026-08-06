@@ -49,6 +49,19 @@ export interface TableState {
   lastShow?: ShowResolution;
   log: ActionLogEntry[];
   startAt?: number;
+  revision: number;
+  pendingShow?: {
+    requestId: string;
+    requesterId: string;
+    defenderId: string;
+    label: "Show" | "Back show";
+  };
+  privateReveal?: {
+    requestId: string;
+    playerIds: string[];
+    viewerIds: string[];
+    expiresAt: number;
+  };
 }
 
 const SEATS = ["South", "West", "North", "East", "Far West", "Far East", "Top"];
@@ -216,7 +229,7 @@ export function dealNewHand(input: {
     deck,
     centerHistory,
     players,
-    revealedPlayerIds: [input.userId],
+    revealedPlayerIds: [],
     actionCount: 0,
     log: [
       makeLog(input.openingLog ?? `Hand ${input.handNumber} dealt.`, "good"),
@@ -230,6 +243,7 @@ export function dealNewHand(input: {
       ),
     ],
     startAt: input.startAt,
+    revision: 0,
   };
 }
 
@@ -339,7 +353,9 @@ export function respondToShowRequest(
 
   const requester = state.players[state.turnIndex];
   const livePlayers = getActivePlayers(state);
-  const defenderIndex =
+  const defenderIndex = state.pendingShow
+    ? state.players.findIndex((player) => player.id === state.pendingShow?.defenderId)
+    :
     livePlayers.length === 2
       ? state.players.findIndex(
           (player) => player.status === "active" && player.id !== requester.id,
@@ -351,10 +367,51 @@ export function respondToShowRequest(
   }
 
   if (response === "decline") {
-    return declineBackShow(state, defenderIndex);
+    const declined = declineBackShow(state, defenderIndex);
+    declined.pendingShow = undefined;
+    return declined;
   }
 
-  return acceptBackShow(state, defenderIndex);
+  const accepted = acceptBackShow(state, defenderIndex);
+  accepted.pendingShow = undefined;
+  accepted.privateReveal = {
+    requestId: state.pendingShow?.requestId ?? `show-${state.actionCount + 1}`,
+    playerIds: [requester.id, state.players[defenderIndex].id],
+    viewerIds: [requester.id, state.players[defenderIndex].id],
+    expiresAt: Date.now() + 2200,
+  };
+  return accepted;
+}
+
+export function createShowRequest(
+  state: TableState,
+  requesterId: string,
+  requestId: string,
+  label: "Show" | "Back show",
+) {
+  if (!isPlayersTurn(state, requesterId) || state.pendingShow) {
+    return state;
+  }
+
+  const livePlayers = getActivePlayers(state);
+  const defender =
+    livePlayers.length === 2
+      ? livePlayers.find((player) => player.id !== requesterId)
+      : state.players[previousActiveIndex(state.players, state.turnIndex)];
+
+  if (!defender) {
+    return state;
+  }
+
+  return {
+    ...state,
+    pendingShow: {
+      requestId,
+      requesterId,
+      defenderId: defender.id,
+      label,
+    },
+  };
 }
 
 export function requestFinalShow(state: TableState, requesterId: string): TableState {
@@ -567,11 +624,6 @@ function acceptBackShow(state: TableState, defenderIndex: number) {
   });
   const nextState = cloneState(state);
   nextState.lastShow = resolution;
-  nextState.revealedPlayerIds = reveal(
-    nextState.revealedPlayerIds,
-    requester.id,
-    defender.id,
-  );
   nextState.actionCount += 1;
 
   if (resolution.outcome === "split") {
@@ -673,6 +725,10 @@ function cloneState(state: TableState): TableState {
     revealedPlayerIds: [...state.revealedPlayerIds],
     log: [...state.log],
     lastShow: state.lastShow ? { ...state.lastShow } : undefined,
+    pendingShow: state.pendingShow ? { ...state.pendingShow } : undefined,
+    privateReveal: state.privateReveal
+      ? { ...state.privateReveal, playerIds: [...state.privateReveal.playerIds], viewerIds: [...state.privateReveal.viewerIds] }
+      : undefined,
   };
 }
 
