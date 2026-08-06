@@ -2192,10 +2192,9 @@ function PokerBackdrop({ featured = false }: { featured?: boolean }) {
         sizes="100vw"
         src="/north-tash-home.jpg"
       />
-      <div className={`absolute inset-0 ${featured ? "bg-black/35" : "bg-[#07100c]/78"}`} />
-      {featured ? (
-        <div className="absolute inset-y-0 left-0 w-full bg-[#07100c]/35 sm:w-[58%] sm:bg-[#07100c]/68" />
-      ) : null}
+      <div
+        className={`absolute inset-0 ${featured ? "bg-[#07100c]/62" : "bg-[#07100c]/78"}`}
+      />
     </div>
   );
 }
