@@ -136,6 +136,8 @@ export function GameShell() {
   const [testRoomScenario, setTestRoomScenario] = useState<TestRoomScenario>(null);
   const [incomingChipRequest, setIncomingChipRequest] = useState<IncomingChipRequest | null>(null);
   const [onlineUserId, setOnlineUserId] = useState<string | null>(null);
+  const [joinPending, setJoinPending] = useState(false);
+  const [countdownNow, setCountdownNow] = useState(() => Date.now());
   const [turnRemainingMs, setTurnRemainingMs] = useState(
     AFLATOON_RULES.turnTimerSeconds * 1000,
   );
@@ -190,7 +192,11 @@ export function GameShell() {
     const unsubscribe = subscribeToMultiplayerRoom(room.code, (snapshot) => {
       applyingRemoteSnapshotRef.current = true;
       setRoom(snapshot.room as unknown as RoomState);
-      setTable(snapshot.table as unknown as TableState | null);
+      setTable(
+        snapshot.table
+          ? { ...(snapshot.table as unknown as TableState), userId: currentPlayerId }
+          : null,
+      );
       if (snapshot.table) {
         setScreen("table");
       }
@@ -200,7 +206,24 @@ export function GameShell() {
     });
 
     return unsubscribe;
-  }, [room?.code]);
+  }, [currentPlayerId, room?.code]);
+
+  useEffect(() => {
+    const startAt = table?.startAt;
+
+    if (!startAt) {
+      return;
+    }
+
+    const interval = window.setInterval(() => setCountdownNow(Date.now()), 100);
+    return () => window.clearInterval(interval);
+  }, [table?.startAt]);
+
+  const countdownRemaining = table?.startAt
+    ? Math.max(0, table.startAt - countdownNow) > 0
+      ? Math.ceil((table.startAt - countdownNow) / 1000)
+      : null
+    : null;
 
   useEffect(() => {
     if (!room?.code || !onlineUserId || applyingRemoteSnapshotRef.current) {
@@ -407,7 +430,7 @@ export function GameShell() {
     setScreen("room-code");
   }
 
-  function showBuyIn() {
+  async function showBuyIn() {
     const typedCode = codeInputRef.current?.value.replace(/\D/g, "").slice(0, 3) ?? "";
     const code = typedCode || roomCode;
     const name = readPlayerName();
@@ -429,6 +452,42 @@ export function GameShell() {
         setFormError("This room is full.");
         return;
       }
+
+      setJoinPending(true);
+
+      try {
+        const userId = await ensureAnonymousSession();
+
+        if (!userId) {
+          throw new Error("Online room service is unavailable. Please try again.");
+        }
+
+        const playerId = `p-${userId}`;
+        const joined = await joinMultiplayerRoom(code, {
+          id: playerId,
+          name,
+          chips: AFLATOON_RULES.startingChips,
+        });
+
+        if (!joined?.snapshot.room) {
+          throw new Error(`Room ${code} was not found online.`);
+        }
+
+        setOnlineUserId(userId);
+        setRoomCode(code);
+        setFormError("");
+        setScreen("buy-in");
+      } catch (error) {
+        setFormError(
+          error instanceof Error
+            ? error.message
+            : `Room ${code} could not be joined. Check the code and try again.`,
+        );
+      } finally {
+        setJoinPending(false);
+      }
+
+      return;
     }
 
     setFormError("");
@@ -470,7 +529,11 @@ export function GameShell() {
 
       if (authenticatedUserId && isSupabaseConfigured()) {
         try {
-          const joined = await joinMultiplayerRoom(roomCode, playerId);
+          const joined = await joinMultiplayerRoom(roomCode, {
+            id: playerId,
+            name: player.name,
+            chips: player.chips,
+          });
           onlineRoom = joined?.snapshot.room as unknown as RoomState;
         } catch (error) {
           setFormError(
@@ -567,6 +630,7 @@ export function GameShell() {
         roomCode: room.code,
         userId: currentPlayerId,
         players: room.players,
+        startAt: Date.now() + 3300,
       }),
     );
     setScreen("table");
@@ -974,9 +1038,13 @@ export function GameShell() {
               </p>
             ) : null}
 
-            <PrimaryButton onClick={showBuyIn}>
+            <PrimaryButton onClick={showBuyIn} disabled={joinPending}>
               <Play size={18} />
-              {roomMode === "create" ? "Continue" : "Join The Room"}
+              {joinPending
+                ? "Checking Room..."
+                : roomMode === "create"
+                  ? "Continue"
+                  : "Join The Room"}
             </PrimaryButton>
           </section>
         </section>
@@ -1117,7 +1185,15 @@ export function GameShell() {
   }
 
   if (!table) {
-    return null;
+    return (
+      <main className="grid min-h-screen place-items-center bg-[#101410] px-5 text-center text-white">
+        <div>
+          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-[#d2a84b]" />
+          <p className="mt-4 text-sm font-semibold">Joining the table...</p>
+          <p className="mt-1 text-xs text-white/55">Waiting for the shared game state.</p>
+        </div>
+      </main>
+    );
   }
 
   const center = describeCenterCard(getActiveCenter(table));
@@ -1162,6 +1238,18 @@ export function GameShell() {
             </div>
 
             <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
+              {countdownRemaining !== null ? (
+                <div className="pointer-events-none absolute inset-0 z-40 grid place-items-center bg-black/45 backdrop-blur-[2px]">
+                  <div className="text-center">
+                    <p className="text-xs font-bold uppercase tracking-[0.28em] text-[#f5d77d]">
+                      Cards dealing
+                    </p>
+                    <p className="mt-2 text-8xl font-black leading-none text-white drop-shadow-[0_4px_18px_rgba(0,0,0,0.55)]">
+                      {countdownRemaining}
+                    </p>
+                  </div>
+                </div>
+              ) : null}
               <div className="center-chip-ledger relative z-10 mb-2 rounded-md border border-white/10 bg-black/30 px-2 py-2 backdrop-blur">
                 <ChipLedger potChips={table.pot} userPlayer={userPlayer} />
               </div>
@@ -1379,10 +1467,19 @@ function BackButton({ onClick }: { onClick: () => void }) {
   );
 }
 
-function PrimaryButton({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+function PrimaryButton({
+  children,
+  disabled = false,
+  onClick,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
   return (
     <button
-      className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#d2a84b] px-4 text-sm font-bold text-[#161812] transition hover:bg-[#ecc65f] first:mt-0"
+      className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#d2a84b] px-4 text-sm font-bold text-[#161812] transition hover:bg-[#ecc65f] disabled:cursor-wait disabled:opacity-60 first:mt-0"
+      disabled={disabled}
       type="button"
       onClick={onClick}
     >
@@ -2871,4 +2968,3 @@ function upsertPlayer(room: RoomState, player: LobbyPlayer): RoomState {
     players: [...players, player].slice(0, AFLATOON_RULES.maxPlayers),
   };
 }
-
