@@ -10,12 +10,14 @@ import {
   buyInChips,
   calculatePlayerSettlements,
   calculateTransferObligations,
+  createTableFromPlayers,
   createShowRequest,
   createDeck,
   createLocalTable,
   getActiveCenter,
   getCurrentPlayer,
   netPlayerSettlements,
+  payBoot,
   playChaal,
   queueBuyInRequest,
   queueTransferRequest,
@@ -37,25 +39,54 @@ test("deck has 52 unique cards and seeded shuffle is stable", () => {
   assert.deepEqual(shuffleDeck(deck, 42), shuffleDeck(deck, 42));
 });
 
-test("new table deals, boots, opening chaal and player plus one centre cards", () => {
+test("opening contributions charge 2 chips each and 3 chips total for the opener", () => {
   const table = createLocalTable({
     roomCode: "123",
     userName: "Vivaan",
     botNames: ["Kabir", "Ishaan", "Ayaan"],
     seed: 7,
   });
-  const opener = table.players.find((player) => player.chips === 15);
+  const opener = table.players.find((player) => player.chips === 17);
   const normalBootedPlayers = table.players.filter((player) => player.chips === 18);
 
   assert.equal(table.roomCode, "123");
   assert.equal(table.players.length, 4);
   assert.equal(table.players[0].name, "Vivaan");
   assert.equal(table.phase, "playing");
-  assert.equal(table.pot, AFLATOON_RULES.bootChips * 4 + AFLATOON_RULES.openingChaalChips);
+  assert.equal(
+    table.pot,
+    AFLATOON_RULES.bootChips * (table.players.length - 1) + AFLATOON_RULES.openingChaalChips,
+  );
   assert.equal(table.centerHistory.length, getOpeningCenterAdvance(4));
   assert.equal(table.players.every((player) => player.hand.length === 3), true);
   assert.ok(opener);
   assert.equal(normalBootedPlayers.length, 3);
+});
+
+test("all players pay boots before a hand deals and heads-up starts with a 5-chip pot", () => {
+  let table = createTableFromPlayers({
+    roomCode: "123",
+    userId: "one",
+    players: [
+      { id: "one", name: "Player 1", chips: 20 },
+      { id: "two", name: "Player 2", chips: 20 },
+    ],
+    seed: 0,
+  });
+
+  assert.equal(table.phase, "collecting-boots");
+  assert.equal(table.pot, 0);
+  assert.equal(table.players.every((player) => player.hand.length === 0), true);
+
+  table = payBoot(table, "one", 0);
+  assert.equal(table.phase, "collecting-boots");
+  assert.equal(table.pot, 2);
+
+  table = payBoot(table, "two", 0);
+  assert.equal(table.phase, "playing");
+  assert.equal(table.pot, 5);
+  assert.equal(table.players.every((player) => player.hand.length === 3), true);
+  assert.deepEqual(table.players.map((player) => player.chips), [18, 17]);
 });
 
 test("chaal automatically advances the centre card and turn", () => {
@@ -159,13 +190,17 @@ test("buy-in and next-hand reset preserve table state", () => {
   assert.equal(table.players[0].chips, 38);
   assert.equal(table.players[0].totalBuyInChips, 40);
 
-  const next = startNextHand(
+  let next = startNextHand(
     {
       ...table,
       phase: "hand-complete",
     },
     10,
   );
+
+  for (const playerId of next.pendingBootPlayerIds ?? []) {
+    next = payBoot(next, playerId, 0);
+  }
 
   assert.equal(next.handNumber, 2);
   assert.equal(next.players[0].hand.length, 3);

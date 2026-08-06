@@ -63,6 +63,7 @@ import {
   getCurrentPlayer,
   makeRoomCode,
   netPlayerSettlements,
+  payBoot,
   playChaal,
   queueBuyInRequest,
   queueTransferRequest,
@@ -149,7 +150,10 @@ export function normalizeSharedTable(value: unknown): TableState | null {
   }
 
   const candidate = value as Partial<TableState>;
-  const validPhase = candidate.phase === "playing" || candidate.phase === "hand-complete";
+  const validPhase =
+    candidate.phase === "collecting-boots" ||
+    candidate.phase === "playing" ||
+    candidate.phase === "hand-complete";
 
   if (
     !validPhase ||
@@ -157,7 +161,7 @@ export function normalizeSharedTable(value: unknown): TableState | null {
     !Array.isArray(candidate.players) ||
     candidate.players.length < AFLATOON_RULES.minPlayers ||
     !Array.isArray(candidate.centerHistory) ||
-    candidate.centerHistory.length === 0 ||
+    (candidate.phase !== "collecting-boots" && candidate.centerHistory.length === 0) ||
     !Number.isInteger(candidate.turnIndex) ||
     !Number.isInteger(candidate.dealerIndex)
   ) {
@@ -187,6 +191,9 @@ export function normalizeSharedTable(value: unknown): TableState | null {
       ? candidate.pendingTransferRequests
       : [],
     transferLedger: Array.isArray(candidate.transferLedger) ? candidate.transferLedger : [],
+    pendingBootPlayerIds: Array.isArray(candidate.pendingBootPlayerIds)
+      ? candidate.pendingBootPlayerIds
+      : [],
   };
 }
 
@@ -436,7 +443,9 @@ export function GameShell() {
         let next = current;
         const requestId = String(action.payload.requestId ?? action.id);
 
-        if (action.actionType === "chaal") {
+        if (action.actionType === "pay_boot") {
+          next = payBoot(current, actorId, Date.now() + 3300);
+        } else if (action.actionType === "chaal") {
           next = playChaal(current, actorId);
         } else if (action.actionType === "fold") {
           next = foldPlayer(current, actorId);
@@ -935,6 +944,28 @@ export function GameShell() {
   }, [currentPlayerId, incomingChipRequest, pendingShow, room?.hostId, sessionEnded, showOverlay, table?.actionCount, table?.phase, table?.turnIndex, table]);
 
   useEffect(() => {
+    if (!table || table.phase !== "collecting-boots" || !testRoomScenario) {
+      return;
+    }
+
+    const bot = table.players.find(
+      (player) => player.isBot && table.pendingBootPlayerIds?.includes(player.id),
+    );
+
+    if (!bot) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setTable((currentTable) =>
+        currentTable ? payBoot(currentTable, bot.id, Date.now() + 3300) : currentTable,
+      );
+    }, 450);
+
+    return () => window.clearTimeout(timeout);
+  }, [table, testRoomScenario]);
+
+  useEffect(() => {
     if (!table || table.phase !== "playing" || testRoomScenario) {
       return;
     }
@@ -1187,6 +1218,23 @@ export function GameShell() {
     canonicalRevisionRef.current = nextTable.revision;
     setTable(nextTable);
     setScreen("table");
+  }
+
+  function payUserBoot() {
+    if (!table || table.phase !== "collecting-boots" || actionPending) {
+      return;
+    }
+
+    if (dispatchGameAction("pay_boot")) {
+      showOverlay("Boot sent to the pot", "good");
+      return;
+    }
+
+    setActionPending(true);
+    setTable((currentTable) =>
+      currentTable ? payBoot(currentTable, currentTable.userId, Date.now() + 3300) : currentTable,
+    );
+    window.setTimeout(() => setActionPending(false), 250);
   }
 
   function requestChips(chips: 10 | 20) {
@@ -1868,7 +1916,8 @@ export function GameShell() {
     );
   }
 
-  const center = describeCenterCard(getActiveCenter(table));
+  const center =
+    table.phase === "collecting-boots" ? null : describeCenterCard(getActiveCenter(table));
   const currentPlayer = getCurrentPlayer(table);
   const userPlayer = table.players.find((player) => player.id === table.userId);
   const activePlayers = getActivePlayers(table);
@@ -1905,8 +1954,12 @@ export function GameShell() {
           <section className="game-surface flex min-h-0 flex-col overflow-hidden bg-[#123823] lg:min-h-[720px]">
             <div className="grid grid-cols-3 items-center gap-2 border-b border-white/10 bg-black/25 px-3 py-3">
               <PotMetric chips={table.pot} />
-              <Metric label="Turn" value={currentPlayer?.name ?? ""} sub={userCanAct ? "Your move" : "Wait"} />
-              <ModeBadge mode={center.mode} />
+              <Metric
+                label={table.phase === "collecting-boots" ? "Round" : "Turn"}
+                value={table.phase === "collecting-boots" ? "Boots" : currentPlayer?.name ?? ""}
+                sub={table.phase === "collecting-boots" ? "Collecting" : userCanAct ? "Your move" : "Wait"}
+              />
+              {center ? <ModeBadge mode={center.mode} /> : <Metric label="Status" value="Ready" sub="Pay boot" />}
             </div>
 
             <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
@@ -1934,6 +1987,14 @@ export function GameShell() {
                 turnRemainingMs={turnRemainingMs}
               />
 
+              {table.phase === "collecting-boots" ? (
+                <BootCollectionPanel
+                  actionPending={actionPending}
+                  onPayBoot={payUserBoot}
+                  table={table}
+                />
+              ) : null}
+
               {overlay ? <ActionOverlay overlay={overlay} /> : null}
               {pendingFold ? (
                 <FoldConfirmOverlay onCancel={cancelFold} onConfirm={confirmFold} />
@@ -1953,7 +2014,7 @@ export function GameShell() {
                 ) : null
               ) : null}
 
-              {userPlayer ? (
+              {userPlayer && center && table.phase === "playing" ? (
                 <UserPanel
                   player={userPlayer}
                   center={center}
@@ -2324,7 +2385,7 @@ function OvalTable({
   temporaryRevealIds,
   turnRemainingMs,
 }: {
-  center: ReturnType<typeof describeCenterCard>;
+  center: ReturnType<typeof describeCenterCard> | null;
   localPlayerId?: string;
   table: TableState;
   temporaryRevealIds: string[];
@@ -2402,14 +2463,16 @@ function OvalTable({
     <section className="relative mx-auto mb-2 h-[350px] w-full max-w-4xl sm:mb-4 sm:h-[470px]" ref={tableRef}>
       <div className="absolute inset-x-0 top-12 bottom-12 rounded-[50%] border-[10px] border-[#5c3b20] bg-[radial-gradient(ellipse_at_center,#2f8b58_0%,#1d6740_48%,#11402a_100%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08),inset_0_28px_70px_rgba(255,255,255,0.07),0_28px_70px_rgba(0,0,0,0.42)] sm:inset-x-3 sm:top-6 sm:bottom-6" />
       <div className="absolute inset-x-6 top-[100px] bottom-[100px] rounded-[50%] border border-[#d2a84b]/25 bg-black/10 sm:inset-x-14 sm:top-24 sm:bottom-24" />
-      <div className="absolute left-1/2 top-[54%] w-[164px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/28 p-1.5 text-center shadow-xl shadow-black/25 backdrop-blur sm:top-[48%] sm:w-[288px] sm:p-3">
-        <CenterDeck
-          actionCount={table.actionCount}
-          card={getActiveCenter(table)}
-          center={center}
-          count={table.centerHistory.length}
-        />
-      </div>
+      {center ? (
+        <div className="absolute left-1/2 top-[54%] w-[172px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/28 p-1.5 text-center shadow-xl shadow-black/25 backdrop-blur sm:top-[48%] sm:w-[288px] sm:p-3">
+          <CenterDeck
+            actionCount={table.actionCount}
+            card={getActiveCenter(table)}
+            center={center}
+            count={table.centerHistory.length}
+          />
+        </div>
+      ) : null}
 
       {table.players.map((player, index) => (
         (() => {
@@ -2441,11 +2504,68 @@ function OvalTable({
           }
           timerKey={`${table.handNumber}-${table.actionCount}-${table.turnIndex}`}
           turnRemainingMs={turnRemainingMs}
+          showCards={table.phase !== "collecting-boots"}
         />
           );
         })()
       ))}
     </section>
+  );
+}
+
+function BootCollectionPanel({
+  actionPending,
+  onPayBoot,
+  table,
+}: {
+  actionPending: boolean;
+  onPayBoot: () => void;
+  table: TableState;
+}) {
+  const pendingIds = new Set(table.pendingBootPlayerIds ?? []);
+  const userNeedsToPay = pendingIds.has(table.userId);
+
+  return (
+    <div className="absolute inset-0 z-20 grid place-items-center px-4">
+      <div className="surface-panel w-full max-w-xs p-4 text-center">
+        <p className="text-xs font-bold uppercase text-[#f5d77d]">Round {table.handNumber}</p>
+        <h2 className="mt-1 text-xl font-black text-white">Put in your boot</h2>
+        <p className="mt-1 text-sm text-white/60">
+          Every player puts in {AFLATOON_RULES.bootChips} chips. The player after the dealer opens with {AFLATOON_RULES.openingChaalChips} chips total.
+        </p>
+        <div className="mt-4 space-y-2 text-left">
+          {table.players
+            .filter((player) => player.status === "active")
+            .map((player) => {
+              const paid = !pendingIds.has(player.id);
+
+              return (
+                <div
+                  className="flex items-center justify-between rounded-md border border-white/10 bg-black/20 px-3 py-2 text-sm"
+                  key={player.id}
+                >
+                  <span className="truncate font-semibold text-white">{player.name}</span>
+                  <span className={paid ? "font-bold text-[#f5d77d]" : "text-white/45"}>
+                    {paid ? "Paid" : "Waiting"}
+                  </span>
+                </div>
+              );
+            })}
+        </div>
+        {userNeedsToPay ? (
+          <button
+            className="primary-action mt-4 flex h-12 w-full items-center justify-center px-4 text-sm font-black disabled:cursor-wait disabled:opacity-60"
+            disabled={actionPending}
+            type="button"
+            onClick={onPayBoot}
+          >
+            Put {AFLATOON_RULES.bootChips} Chips In Pot
+          </button>
+        ) : (
+          <p className="mt-4 text-sm font-semibold text-[#f5d77d]">Your boot is in. Waiting for the table.</p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2461,7 +2581,7 @@ function CenterDeck({
   count: number;
 }) {
   return (
-    <div className="center-deck-content origin-center scale-[0.7] sm:scale-100">
+    <div className="center-deck-content origin-center scale-[0.74] sm:scale-100">
         <div className="mt-2 flex items-center justify-center gap-3 sm:mt-3 sm:gap-4">
         <div className="deck-stack relative h-28 w-20 origin-left scale-[0.84] sm:scale-100">
           <div className="deck-real-card deck-real-card-one">
@@ -2584,6 +2704,7 @@ function Seat({
   player,
   positionClass,
   revealed,
+  showCards,
   timerActive,
   timerKey,
   turnRemainingMs,
@@ -2596,6 +2717,7 @@ function Seat({
   player: TablePlayer;
   positionClass: string;
   revealed: boolean;
+  showCards: boolean;
   timerActive: boolean;
   timerKey: string;
   turnRemainingMs: number;
@@ -2629,7 +2751,7 @@ function Seat({
       {timerActive ? (
         <SeatTimerBar key={timerKey} remainingMs={turnRemainingMs} />
       ) : null}
-      {!isUser ? (
+      {!isUser && showCards ? (
         <div className={`mt-1 flex justify-center ${revealed && player.hand.length === 3 ? "-space-x-3" : "-space-x-2"}`}>
           {displayedHand.map((card, cardIndex) => (
             <PlayingCard

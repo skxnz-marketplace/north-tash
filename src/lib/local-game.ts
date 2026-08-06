@@ -8,7 +8,7 @@ import {
 } from "./aflatoon.ts";
 import type { Card, ShowResolution } from "./aflatoon.ts";
 
-export type TablePhase = "playing" | "hand-complete";
+export type TablePhase = "collecting-boots" | "playing" | "hand-complete";
 export type PlayerStatus = "active" | "folded" | "eliminated" | "standing";
 export type LogTone = "neutral" | "good" | "warn" | "danger";
 
@@ -90,6 +90,7 @@ export interface TableState {
     viewerIds: string[];
     expiresAt: number;
   };
+  pendingBootPlayerIds?: string[];
   pendingBuyInRequests?: BuyInRequest[];
   pendingTransferRequests?: TransferRequest[];
   transferLedger?: TransferLedgerEntry[];
@@ -181,17 +182,68 @@ export function createTableFromPlayers(input: {
       hand: [],
     }));
 
-  return dealNewHand({
+  return prepareNewHand({
     roomCode: input.roomCode,
     userId: input.userId,
     players,
     dealerIndex: Math.abs(input.seed ?? 0) % players.length,
     handNumber: 1,
     carryOverPot: 0,
-    seed: input.seed,
-    startAt: input.startAt,
     openingLog: `Room ${input.roomCode} started with ${players.length} players.`,
   });
+}
+
+function prepareNewHand(input: {
+  roomCode: string;
+  userId: string;
+  players: TablePlayer[];
+  dealerIndex: number;
+  handNumber: number;
+  carryOverPot: number;
+  openingLog?: string;
+  transferLedger?: TransferLedgerEntry[];
+}): TableState {
+  const seatedPlayers = input.players.filter((player) => player.status !== "standing");
+
+  if (
+    seatedPlayers.length < AFLATOON_RULES.minPlayers ||
+    seatedPlayers.length > AFLATOON_RULES.maxPlayers
+  ) {
+    throw new RangeError("Aflatoon needs 2 to 7 seated players.");
+  }
+
+  const players = input.players.map<TablePlayer>((player) => ({
+    ...player,
+    hand: [],
+    declinesUsed: 0,
+    status: player.status === "standing" ? "standing" : "active",
+  }));
+  const dealerIndex = clampSeatIndex(input.dealerIndex, players);
+
+  return {
+    roomCode: input.roomCode,
+    userId: input.userId,
+    phase: "collecting-boots",
+    handNumber: input.handNumber,
+    dealerIndex,
+    turnIndex: nextActiveIndex(players, dealerIndex),
+    pot: input.carryOverPot,
+    carryOverPot: 0,
+    deck: [],
+    centerHistory: [],
+    players,
+    revealedPlayerIds: [],
+    actionCount: 0,
+    log: [
+      makeLog(input.openingLog ?? `Round ${input.handNumber} is ready.`, "good"),
+      makeLog(`Waiting for every player to put in the ${AFLATOON_RULES.bootChips}-chip boot.`, "neutral"),
+    ],
+    pendingBootPlayerIds: players
+      .filter((player) => player.status === "active")
+      .map((player) => player.id),
+    revision: 0,
+    transferLedger: input.transferLedger?.map((entry) => ({ ...entry })) ?? [],
+  };
 }
 
 export function dealNewHand(input: {
@@ -205,6 +257,7 @@ export function dealNewHand(input: {
   openingLog?: string;
   startAt?: number;
   transferLedger?: TransferLedgerEntry[];
+  bootsAlreadyCollected?: boolean;
 }): TableState {
   const seatedPlayers = input.players.filter((player) => player.status !== "standing");
 
@@ -237,13 +290,20 @@ export function dealNewHand(input: {
   const openerIndex = nextActiveIndex(players, dealerIndex);
   let pot = input.carryOverPot;
 
-  for (const player of players) {
-    if (player.status === "active") {
-      pot += chargePlayer(player, AFLATOON_RULES.bootChips);
+  if (!input.bootsAlreadyCollected) {
+    for (const player of players) {
+      if (player.status === "active") {
+        pot += chargePlayer(player, AFLATOON_RULES.bootChips);
+      }
     }
   }
 
-  pot += chargePlayer(players[openerIndex], AFLATOON_RULES.openingChaalChips);
+  // The opener's compulsory chaal is their total opening contribution, not an
+  // extra 3 chips on top of the 2-chip boot.
+  pot += chargePlayer(
+    players[openerIndex],
+    AFLATOON_RULES.openingChaalChips - AFLATOON_RULES.bootChips,
+  );
 
   const firstTurnIndex = nextActiveIndex(players, openerIndex);
   const activeCenter = centerHistory[centerHistory.length - 1];
@@ -263,6 +323,7 @@ export function dealNewHand(input: {
     players,
     revealedPlayerIds: [],
     actionCount: 0,
+    pendingBootPlayerIds: [],
     log: [
       makeLog(input.openingLog ?? `Hand ${input.handNumber} dealt.`, "good"),
       makeLog(
@@ -270,7 +331,7 @@ export function dealNewHand(input: {
         "neutral",
       ),
       makeLog(
-        `${players[openerIndex].name} paid the compulsory ${AFLATOON_RULES.openingChaalChips}-chip opening chaal.`,
+        `${players[openerIndex].name} opened with ${AFLATOON_RULES.openingChaalChips} chips total.`,
         "neutral",
       ),
     ],
@@ -278,6 +339,41 @@ export function dealNewHand(input: {
     revision: 0,
     transferLedger: input.transferLedger?.map((entry) => ({ ...entry })) ?? [],
   };
+}
+
+export function payBoot(state: TableState, playerId: string, startAt?: number): TableState {
+  if (state.phase !== "collecting-boots" || !state.pendingBootPlayerIds?.includes(playerId)) {
+    return state;
+  }
+
+  const nextState = cloneState(state);
+  const player = nextState.players.find((candidate) => candidate.id === playerId);
+
+  if (!player || player.status !== "active") {
+    return state;
+  }
+
+  nextState.pot += chargePlayer(player, AFLATOON_RULES.bootChips);
+  nextState.pendingBootPlayerIds = nextState.pendingBootPlayerIds?.filter((id) => id !== playerId);
+  const withLog = appendLog(nextState, `${player.name} put in the ${AFLATOON_RULES.bootChips}-chip boot.`, "neutral");
+
+  if (withLog.pendingBootPlayerIds?.length) {
+    return withLog;
+  }
+
+  return dealNewHand({
+    roomCode: withLog.roomCode,
+    userId: withLog.userId,
+    players: withLog.players,
+    dealerIndex: withLog.dealerIndex,
+    handNumber: withLog.handNumber,
+    carryOverPot: withLog.pot,
+    seed: Date.now(),
+    startAt,
+    openingLog: `All boots are in. Hand ${withLog.handNumber} dealt.`,
+    transferLedger: withLog.transferLedger,
+    bootsAlreadyCollected: true,
+  });
 }
 
 export function getActiveCenter(state: TableState) {
@@ -793,9 +889,10 @@ export function standPlayer(state: TableState, playerId: string): TableState {
 }
 
 export function startNextHand(state: TableState, seed = Date.now()) {
+  void seed;
   const nextDealer = nextSeatIndex(state.players, state.dealerIndex);
 
-  return dealNewHand({
+  return prepareNewHand({
     roomCode: state.roomCode,
     userId: state.userId,
     players: state.players.map((player) => ({
@@ -807,7 +904,6 @@ export function startNextHand(state: TableState, seed = Date.now()) {
     dealerIndex: nextDealer,
     handNumber: state.handNumber + 1,
     carryOverPot: state.carryOverPot,
-    seed,
     transferLedger: state.transferLedger,
   });
 }
@@ -986,6 +1082,7 @@ function cloneState(state: TableState): TableState {
     privateReveal: state.privateReveal
       ? { ...state.privateReveal, playerIds: [...state.privateReveal.playerIds], viewerIds: [...state.privateReveal.viewerIds] }
       : undefined,
+    pendingBootPlayerIds: [...(state.pendingBootPlayerIds ?? [])],
     pendingBuyInRequests: state.pendingBuyInRequests?.map((request) => ({ ...request })),
     pendingTransferRequests: state.pendingTransferRequests?.map((request) => ({ ...request })),
     transferLedger: state.transferLedger?.map((entry) => ({ ...entry })),
