@@ -8,6 +8,7 @@ import {
 } from "./aflatoon.ts";
 import {
   buyInChips,
+  createShowRequest,
   createDeck,
   createLocalTable,
   getActiveCenter,
@@ -206,4 +207,40 @@ test("heads-up decline costs four chips and flips one centre card", () => {
   );
   assert.equal(second.centerHistory.length, centerCountBefore + 2);
   assert.equal(second.turnIndex, table.turnIndex);
+});
+
+test("declining a queued show never reveals either private hand", () => {
+  let table = createLocalTable({
+    roomCode: "123",
+    userName: "Vivaan",
+    botNames: ["Kabir", "Ishaan"],
+    seed: 31,
+  });
+  table = { ...table, turnIndex: 0 };
+  table = createShowRequest(table, "you", "show-private", "Back show");
+
+  const next = respondToShowRequest(table, "you", "decline");
+
+  assert.equal(next.pendingShow, undefined);
+  assert.equal(next.privateReveal, undefined);
+  assert.deepEqual(next.revealedPlayerIds, []);
+});
+
+test("accepting a queued show limits the temporary reveal to both participants", () => {
+  let table = createLocalTable({
+    roomCode: "123",
+    userName: "Vivaan",
+    botNames: ["Kabir", "Ishaan"],
+    seed: 32,
+  });
+  table = { ...table, turnIndex: 0 };
+  table = createShowRequest(table, "you", "show-private", "Back show");
+  const defenderId = table.pendingShow?.defenderId;
+
+  const next = respondToShowRequest(table, "you", "accept");
+
+  assert.equal(next.pendingShow, undefined);
+  assert.equal(next.privateReveal?.requestId, "show-private");
+  assert.deepEqual(next.privateReveal?.viewerIds.sort(), ["you", defenderId].sort());
+  assert.deepEqual(next.privateReveal?.playerIds.sort(), ["you", defenderId].sort());
 });
