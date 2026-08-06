@@ -7,6 +7,7 @@ import {
   resolveShowComparison,
 } from "./aflatoon.ts";
 import type { Card, ShowResolution } from "./aflatoon.ts";
+import type { FlippingState } from "./flipping.ts";
 import type { TableGameMode } from "./game-rules.ts";
 import type { TexasHoldemState } from "./poker.ts";
 
@@ -98,6 +99,7 @@ export interface TableState {
   pendingTransferRequests?: TransferRequest[];
   transferLedger?: TransferLedgerEntry[];
   poker?: TexasHoldemState;
+  flipping?: FlippingState;
 }
 
 const SEATS = ["South", "West", "North", "East", "Far West", "Far East", "Top"];
@@ -1111,6 +1113,23 @@ function cloneState(state: TableState): TableState {
             ...winner,
             bestCards: winner.bestCards?.map((card) => ({ ...card })),
           })),
+        }
+      : undefined,
+    flipping: state.flipping
+      ? {
+          ...state.flipping,
+          activeJokerCards: state.flipping.activeJokerCards.map((card) => ({ ...card })),
+          activeJokerRanks: [...state.flipping.activeJokerRanks],
+          inactiveJokerSets: state.flipping.inactiveJokerSets.map((set) => ({
+            source: { ...set.source },
+            cards: set.cards.map((card) => ({ ...card })),
+          })),
+          players: state.flipping.players.map((player) => ({
+            ...player,
+            cards: player.cards.map((card) => ({ ...card })),
+            publicCards: player.publicCards.map((card) => ({ ...card })),
+          })),
+          actionLog: [...state.flipping.actionLog],
         }
       : undefined,
   };

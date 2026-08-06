@@ -350,6 +350,9 @@ export function stripPrivateHands(snapshot: MultiplayerSnapshot): MultiplayerSna
       burnCards?: unknown[];
       players?: Array<Record<string, unknown>>;
     };
+    flipping?: {
+      players?: Array<Record<string, unknown>>;
+    };
     userId?: string;
     pendingShow?: Record<string, unknown>;
     privateReveal?: Record<string, unknown>;
@@ -373,6 +376,15 @@ export function stripPrivateHands(snapshot: MultiplayerSnapshot): MultiplayerSna
             players: (table.poker.players ?? []).map((player) => ({
               ...player,
               holeCards: [],
+            })),
+          }
+        : undefined,
+      flipping: table.flipping
+        ? {
+            ...table.flipping,
+            players: (table.flipping.players ?? []).map((player) => ({
+              ...player,
+              cards: [],
             })),
           }
         : undefined,

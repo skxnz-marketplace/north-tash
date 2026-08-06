@@ -51,6 +51,15 @@ import {
   rupeesForChips,
 } from "@/lib/aflatoon";
 import type { Card, GameMode } from "@/lib/aflatoon";
+import {
+  FLIPPING_RULES,
+  classicFlippingRulesEngine,
+  flippingMoflessRulesEngine,
+  formatFlippingRupees,
+  type FlippingAction,
+  type FlippingMode,
+  type FlippingState,
+} from "@/lib/flipping";
 import type { TableGameMode } from "@/lib/game-rules";
 import {
   describeHoldemHand,
@@ -167,6 +176,7 @@ export function normalizeSharedTable(value: unknown): TableState | null {
 
   const candidate = value as Partial<TableState>;
   const isPoker = candidate.gameMode === "TEXAS_HOLDEM";
+  const isFlipping = candidate.gameMode === "CLASSIC_FLIPPING" || candidate.gameMode === "FLIPPING_MOFLESS";
   const validPhase =
     candidate.phase === "collecting-boots" ||
     candidate.phase === "playing" ||
@@ -176,9 +186,14 @@ export function normalizeSharedTable(value: unknown): TableState | null {
     !validPhase ||
     typeof candidate.roomCode !== "string" ||
     !Array.isArray(candidate.players) ||
-    candidate.players.length < (isPoker ? TEXAS_HOLDEM_RULES.minPlayers : AFLATOON_RULES.minPlayers) ||
+    candidate.players.length <
+      (isPoker
+        ? TEXAS_HOLDEM_RULES.minPlayers
+        : isFlipping
+          ? FLIPPING_RULES.minPlayers
+          : AFLATOON_RULES.minPlayers) ||
     !Array.isArray(candidate.centerHistory) ||
-    (!isPoker && candidate.phase !== "collecting-boots" && candidate.centerHistory.length === 0) ||
+    (!isPoker && !isFlipping && candidate.phase !== "collecting-boots" && candidate.centerHistory.length === 0) ||
     !Number.isInteger(candidate.turnIndex) ||
     !Number.isInteger(candidate.dealerIndex)
   ) {
@@ -213,6 +228,7 @@ export function normalizeSharedTable(value: unknown): TableState | null {
       ? candidate.pendingBootPlayerIds
       : [],
     poker: candidate.poker,
+    flipping: candidate.flipping,
   };
 }
 
@@ -305,6 +321,128 @@ function tableFromPokerState(current: TableState, poker: TexasHoldemState): Tabl
     log: poker.events.map((text) => ({ id: `${Date.now()}-${text}`, text, tone: "neutral" as const })).slice(0, 10),
     poker,
   };
+}
+
+function createFlippingTableFromRoom(input: {
+  roomCode: string;
+  userId: string;
+  players: LobbyPlayer[];
+  mode: FlippingMode;
+  dealerIndex?: number;
+  seed?: number;
+}): TableState {
+  const activePlayers = input.players.slice(0, FLIPPING_RULES.maxPlayers);
+  const engine = getFlippingEngine(input.mode);
+  const flipping = engine.createInitialState({
+    roomCode: input.roomCode,
+    dealerIndex: input.dealerIndex ?? 0,
+    seed: input.seed,
+    players: activePlayers.map((player) => ({
+      id: player.id,
+      name: player.name,
+      chips: player.chips,
+    })),
+  });
+  const baseTable: TableState = {
+    gameMode: input.mode,
+    roomCode: input.roomCode,
+    userId: input.userId,
+    phase: "playing",
+    handNumber: 1,
+    dealerIndex: input.dealerIndex ?? 0,
+    turnIndex: 0,
+    pot: 0,
+    carryOverPot: 0,
+    deck: [],
+    centerHistory: [],
+    players: activePlayers.map((player, index) => ({
+      id: player.id,
+      name: player.name,
+      seat: index === 0 ? "South" : `Seat ${index + 1}`,
+      chips: player.chips,
+      totalBuyInChips: player.chips,
+      transferBalanceChips: 0,
+      shortChips: 0,
+      declinesUsed: 0,
+      status: "active",
+      isBot: Boolean(player.isBot),
+      hand: [],
+    })),
+    revealedPlayerIds: [],
+    actionCount: 0,
+    log: [],
+    revision: 1,
+    transferLedger: [],
+  };
+
+  return tableFromFlippingState(baseTable, flipping);
+}
+
+function tableFromFlippingState(current: TableState, flipping: FlippingState): TableState {
+  return {
+    ...current,
+    gameMode: flipping.mode,
+    phase: flipping.phase === "COMPLETE" ? "hand-complete" : "playing",
+    pot: flipping.pot,
+    turnIndex: Math.max(
+      0,
+      flipping.players.findIndex((player) => player.playerId === flipping.currentActorPlayerId),
+    ),
+    centerHistory: flipping.activeJokerCards,
+    players: current.players.map((player) => {
+      const flippingPlayer = flipping.players.find((candidate) => candidate.playerId === player.id);
+
+      if (!flippingPlayer) {
+        return player;
+      }
+
+      return {
+        ...player,
+        chips: flippingPlayer.stack,
+        status: flippingPlayer.status === "PACKED" ? "folded" : "active",
+        hand: flippingPlayer.cards.length ? flippingPlayer.cards : player.hand,
+      };
+    }),
+    revealedPlayerIds: flipping.players
+      .filter((player) => player.status === "PACKED" || player.status === "WINNER")
+      .map((player) => player.playerId),
+    actionCount: current.actionCount + 1,
+    log: flipping.actionLog
+      .map((text) => ({ id: `${Date.now()}-${text}`, text, tone: "neutral" as const }))
+      .slice(0, 10),
+    lastShow: flipping.lastShow
+      ? {
+          outcome:
+            flipping.lastShow.winnerIds.length > 1
+              ? "split"
+              : flipping.lastShow.winnerIds[0] === flipping.lastShow.requesterId
+                ? "requester-wins"
+                : "defender-wins",
+          requester: {
+            category: "high-card",
+            label: flipping.lastShow.requester.displayName,
+            tieBreakers: flipping.lastShow.requester.comparisonTuple,
+            bestCards: flipping.lastShow.requester.effectiveCards,
+            jokerCount: flipping.lastShow.requester.jokerCount,
+          },
+          defender: {
+            category: "high-card",
+            label: flipping.lastShow.defender.displayName,
+            tieBreakers: flipping.lastShow.defender.comparisonTuple,
+            bestCards: flipping.lastShow.defender.effectiveCards,
+            jokerCount: flipping.lastShow.defender.jokerCount,
+          },
+          winnerId: flipping.lastShow.winnerIds[0],
+          loserId: flipping.lastShow.loserId,
+          reason: "better-hand",
+        }
+      : current.lastShow,
+    flipping,
+  };
+}
+
+function getFlippingEngine(mode: FlippingMode) {
+  return mode === "CLASSIC_FLIPPING" ? classicFlippingRulesEngine : flippingMoflessRulesEngine;
 }
 
 export function GameShell() {
@@ -604,6 +742,32 @@ export function GameShell() {
             }).catch(() => undefined);
             continue;
           }
+        } else if (action.actionType === "flipping_action") {
+          if (
+            (current.gameMode !== "CLASSIC_FLIPPING" && current.gameMode !== "FLIPPING_MOFLESS") ||
+            !current.flipping
+          ) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "not_flipping" }).catch(() => undefined);
+            continue;
+          }
+          try {
+            const flippingAction = action.payload.action as FlippingAction | undefined;
+            if (!flippingAction) {
+              throw new Error("Missing Flipping action.");
+            }
+            const transition = getFlippingEngine(current.gameMode).applyAction(
+              current.flipping,
+              actorId,
+              flippingAction,
+            );
+            next = tableFromFlippingState(current, transition.state);
+          } catch (error) {
+            await markGameActionProcessed(action.id, {
+              ok: false,
+              reason: error instanceof Error ? error.message : "invalid_flipping_action",
+            }).catch(() => undefined);
+            continue;
+          }
         } else if (action.actionType === "pay_boot") {
           next = payBoot(current, actorId, Date.now() + 3300);
         } else if (action.actionType === "chaal") {
@@ -849,9 +1013,22 @@ export function GameShell() {
                     })),
                   }
                 : undefined;
+              const nextFlipping = currentTable.flipping
+                ? {
+                    ...currentTable.flipping,
+                    players: currentTable.flipping.players.map((player) => ({
+                      ...player,
+                      cards:
+                        player.playerId === currentPlayerId
+                          ? (hand as typeof player.cards)
+                          : (revealMap.get(player.playerId) as typeof player.cards | undefined) ?? player.cards,
+                    })),
+                  }
+                : undefined;
               return {
                 ...currentTable,
                 poker: nextPoker,
+                flipping: nextFlipping,
                 privateReveal: reveals[0]
                   ? {
                       requestId: reveals[0].requestId,
@@ -956,6 +1133,11 @@ export function GameShell() {
             id: player.playerId,
             hand: player.holeCards,
           }))
+        : (canonicalTable.gameMode === "CLASSIC_FLIPPING" || canonicalTable.gameMode === "FLIPPING_MOFLESS") && canonicalTable.flipping
+          ? canonicalTable.flipping.players.map((player) => ({
+              id: player.playerId,
+              hand: player.cards,
+            }))
         : canonicalTable.players;
     const timeout = window.setTimeout(() => {
       void Promise.all([
@@ -1421,7 +1603,17 @@ export function GameShell() {
     }
 
     if (mode === "CLASSIC_FLIPPING" || mode === "FLIPPING_MOFLESS") {
-      showOverlay("Flipping modes are staged next; Aflatoon remains live.", "warn");
+      const nextTable = createFlippingTableFromRoom({
+        roomCode: room.code,
+        userId: currentPlayerId,
+        players: room.players,
+        mode,
+        dealerIndex: Math.floor(Math.random() * room.players.length),
+        seed: Date.now(),
+      });
+      canonicalRevisionRef.current = nextTable.revision;
+      setTable(nextTable);
+      setScreen("table");
       return;
     }
 
@@ -1477,6 +1669,34 @@ export function GameShell() {
       );
     } catch (error) {
       showOverlay(error instanceof Error ? error.message : "Poker action failed", "warn");
+    } finally {
+      window.setTimeout(() => setActionPending(false), 250);
+    }
+  }
+
+  function playFlippingAction(action: FlippingAction) {
+    if (!table?.flipping || actionPending) {
+      return;
+    }
+
+    if (dispatchGameAction("flipping_action", { action })) {
+      showOverlay("Flipping action sent", "neutral");
+      return;
+    }
+
+    setActionPending(true);
+    try {
+      const transition = getFlippingEngine(table.flipping.mode).applyAction(
+        table.flipping,
+        table.userId,
+        action,
+      );
+      setTable((currentTable) =>
+        currentTable ? tableFromFlippingState(currentTable, transition.state) : currentTable,
+      );
+      showOverlay(action.type === "SEE_CARDS" ? "Cards opened" : "Action played", "good");
+    } catch (error) {
+      showOverlay(error instanceof Error ? error.message : "Flipping action failed", "warn");
     } finally {
       window.setTimeout(() => setActionPending(false), 250);
     }
@@ -2279,6 +2499,121 @@ export function GameShell() {
     );
   }
 
+  if (
+    (table.gameMode === "CLASSIC_FLIPPING" || table.gameMode === "FLIPPING_MOFLESS") &&
+    table.flipping
+  ) {
+    const flippingPlayer = table.flipping.players.find((player) => player.playerId === table.userId);
+    const flippingCanAct =
+      table.flipping.currentActorPlayerId === table.userId &&
+      flippingPlayer?.status === "ACTIVE" &&
+      table.flipping.phase === "BETTING";
+    const modeTitle = table.gameMode === "CLASSIC_FLIPPING" ? "Classic Flipping" : "Flipping Mofless";
+
+    return (
+      <main className="app-shell text-[#f7f3e8]">
+        <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
+          <header className="app-header sticky top-0 z-30 flex items-center justify-between border-b border-white/10 px-4 py-3 sm:px-6">
+            <div>
+              <p className="text-xs font-semibold uppercase text-[#d2a84b]">North Tash</p>
+              <h1 className="text-xl font-black text-white">{modeTitle}</h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="subtle-panel px-3 py-2 text-right">
+                <p className="text-xs text-white/50">Room</p>
+                <p className="font-mono text-base font-bold">{table.roomCode}</p>
+              </div>
+              <button
+                aria-label="Open table menu"
+                className="icon-action grid h-11 w-11 place-items-center text-white"
+                type="button"
+                onClick={() => setMenuOpen(true)}
+              >
+                <Menu size={21} />
+              </button>
+            </div>
+          </header>
+
+          <div className="grid flex-1 gap-2 px-2 py-2 sm:gap-4 sm:px-3 sm:py-4 lg:grid-cols-[1fr_310px] lg:px-5">
+            <section className="game-surface flex min-h-0 flex-col overflow-hidden bg-[#123823] lg:min-h-[720px]">
+              <div className="grid grid-cols-3 items-center gap-2 border-b border-white/10 bg-black/25 px-3 py-3">
+                <PotMetric chips={table.pot} />
+                <Metric
+                  label="Turn"
+                  value={
+                    table.flipping.players.find((player) => player.playerId === table.flipping?.currentActorPlayerId)?.name ??
+                    "Done"
+                  }
+                  sub={flippingCanAct ? "Your move" : table.gameMode === "FLIPPING_MOFLESS" ? "Lowest wins" : "Highest wins"}
+                />
+                <Metric
+                  label="Blind eq."
+                  value={`${table.flipping.currentBlindEquivalent}`}
+                  sub={table.flipping.jokersLocked ? "Jokers locked" : "Jokers live"}
+                />
+              </div>
+
+              <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
+                <FlippingTableView
+                  localPlayerId={table.userId}
+                  flipping={table.flipping}
+                  turnRemainingMs={turnRemainingMs}
+                />
+                {overlay ? <ActionOverlay overlay={overlay} /> : null}
+                {table.flipping.phase === "COMPLETE" && table.flipping.lastShow ? (
+                  <FlippingResultPanel flipping={table.flipping} />
+                ) : null}
+                {flippingPlayer ? (
+                  <FlippingActionPanel
+                    actionPending={actionPending}
+                    flipping={table.flipping}
+                    onAction={playFlippingAction}
+                    player={flippingPlayer}
+                  />
+                ) : null}
+              </div>
+            </section>
+
+            <aside className="surface-panel hidden min-h-[720px] flex-col p-3 lg:flex">
+              <FlippingSidebar flipping={table.flipping} />
+            </aside>
+          </div>
+        </section>
+
+        <TableMenu
+          open={menuOpen}
+          isHost={isHost}
+          table={table}
+          chipRequests={displayedChipRequests}
+          currentPlayerId={table.userId}
+          onApproveChipRequest={approveChipRequest}
+          onRejectChipRequest={rejectChipRequest}
+          onRequestChips={requestChips}
+          onRequestTransfer={openTransferRequest}
+          onClose={() => setMenuOpen(false)}
+          onEndSession={endSession}
+          sessionEnded={sessionEnded}
+          onLeave={leaveTable}
+        />
+        <SessionTallyModal
+          open={sessionTallyOpen}
+          players={table.players}
+          potChips={table.pot}
+          transferLedger={table.transferLedger}
+          onClose={() => setSessionTallyOpen(false)}
+        />
+        <TransferRequestModal
+          draft={transferDraft}
+          players={table.players}
+          requesterId={table.userId}
+          onCancel={() => setTransferDraft(null)}
+          onChange={setTransferDraft}
+          onSubmit={submitTransferRequest}
+        />
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell text-[#f7f3e8]">
       <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
@@ -2504,7 +2839,7 @@ function EntryPanel({
         </button>
       </div>
       <button
-        className="mt-5 w-full border-t border-white/10 pt-4 text-xs font-semibold uppercase text-white/42 hover:text-[#e2b653]"
+        className="hidden"
         type="button"
         onClick={onTestMode}
       >
@@ -3147,6 +3482,231 @@ function PokerSidebar({ poker }: { poker: TexasHoldemState }) {
       </div>
       <div className="mt-4 space-y-2">
         {poker.events.map((event) => (
+          <p className="rounded-md bg-white/6 px-3 py-2 text-sm text-white/70" key={event}>
+            {event}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FlippingTableView({
+  localPlayerId,
+  flipping,
+  turnRemainingMs,
+}: {
+  localPlayerId: string;
+  flipping: FlippingState;
+  turnRemainingMs: number;
+}) {
+  return (
+    <section className="relative mx-auto mb-2 h-[390px] w-full max-w-4xl sm:mb-4 sm:h-[500px]">
+      <div className="absolute inset-x-0 top-10 bottom-10 rounded-[50%] border-[10px] border-[#5c3b20] bg-[radial-gradient(ellipse_at_center,#2f8b58_0%,#1d6740_48%,#11402a_100%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08),inset_0_28px_70px_rgba(255,255,255,0.07),0_28px_70px_rgba(0,0,0,0.42)] sm:inset-x-3 sm:top-6 sm:bottom-6" />
+      <div className="absolute left-1/2 top-[47%] z-10 w-[292px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/24 p-3 text-center shadow-xl shadow-black/25 backdrop-blur sm:w-[440px]">
+        <p className="text-xs font-bold uppercase text-[#f5d77d]">
+          Active Jokers {flipping.jokersLocked ? "locked" : "live"}
+        </p>
+        <div className="mt-3 flex min-h-[84px] items-center justify-center gap-2">
+          {flipping.activeJokerCards.map((card, index) => (
+            <PlayingCard card={card} flipped key={`${card.rank}-${card.suit}-${index}`} size="medium" />
+          ))}
+        </div>
+        <p className="mt-2 text-xs font-semibold text-white/65">
+          Joker ranks: {flipping.activeJokerRanks.join(", ")}
+        </p>
+      </div>
+
+      {flipping.players.map((player, index) => {
+        const isUser = player.playerId === localPlayerId;
+        const showOwnCards = isUser && player.visibility === "SEEN" && player.cards.length === 3;
+        const showPublicCards = player.publicCards.length === 3;
+
+        return (
+          <div
+            className={`absolute z-20 w-[124px] rounded-md border border-white/12 bg-black/40 p-2 shadow-lg backdrop-blur sm:w-[156px] ${seatPositionClass(index, flipping.players.length)}`}
+            key={player.playerId}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <p className="truncate text-xs font-black text-white">{player.name}</p>
+              <span className="text-[10px] font-black text-[#f5d77d]" title={player.visibility === "SEEN" ? "Seen - cards viewed" : "Blind - cards not viewed"}>
+                {player.status === "PACKED" ? "PACK" : player.visibility === "SEEN" ? "SEEN" : "BLIND"}
+              </span>
+            </div>
+            <div className="mt-1 flex items-center justify-between text-[10px] font-semibold text-white/60">
+              <span>{player.stack} chips</span>
+              <span>{player.status === "PACKED" ? "Packed" : player.visibility}</span>
+            </div>
+            {flipping.currentActorPlayerId === player.playerId && player.status === "ACTIVE" ? (
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full bg-[#f5d77d]"
+                  style={{
+                    width: `${Math.max(4, Math.min(100, (turnRemainingMs / (AFLATOON_RULES.turnTimerSeconds * 1000)) * 100))}%`,
+                  }}
+                />
+              </div>
+            ) : null}
+            <div className="mt-2 flex justify-center gap-1">
+              {showOwnCards || showPublicCards
+                ? (showOwnCards ? player.cards : player.publicCards).map((card) => (
+                    <PlayingCard card={card} flipped key={`${player.playerId}-${card.rank}-${card.suit}`} size="small" />
+                  ))
+                : [0, 1, 2].map((slot) => <CardBack key={slot} size="small" faded={player.status === "PACKED"} />)}
+            </div>
+            {player.totalHandContribution > 0 ? (
+              <p className="mt-1 text-center text-[10px] font-bold text-[#f5d77d]">
+                In: {player.totalHandContribution}
+              </p>
+            ) : null}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function FlippingActionPanel({
+  actionPending,
+  flipping,
+  onAction,
+  player,
+}: {
+  actionPending: boolean;
+  flipping: FlippingState;
+  onAction: (action: FlippingAction) => void;
+  player: FlippingState["players"][number];
+}) {
+  const legalActions = getFlippingEngine(flipping.mode).getLegalActions(flipping, player.playerId);
+  const chaal = legalActions.actions.find((action) => action.type === "PLACE_CHAAL");
+  const canAct = legalActions.canAct && !actionPending;
+  const minimum = chaal?.minimumAmount ?? (player.visibility === "SEEN" ? flipping.currentBlindEquivalent * 2 : flipping.currentBlindEquivalent);
+  const maximum = chaal?.maximumAmount ?? minimum;
+  const [amount, setAmount] = useState(minimum);
+  const selected = Math.min(maximum, Math.max(minimum, amount));
+  const canSeeCards = player.visibility === "BLIND" && player.cards.length === 3;
+  const modeText = flipping.mode === "FLIPPING_MOFLESS" ? "Lowest hand wins" : "Highest hand wins";
+  const finalTwo = flipping.players.filter((candidate) => candidate.status === "ACTIVE").length === 2;
+
+  return (
+    <div className="surface-panel-soft p-3 shadow-xl shadow-black/25">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs uppercase text-white/50">Your Flipping hand</p>
+          <p className="truncate text-sm font-semibold text-white">
+            {player.visibility === "SEEN"
+              ? `${modeText}. Jokers: ${flipping.activeJokerRanks.join(", ")}`
+              : "Blind - cards hidden until you see them"}
+          </p>
+        </div>
+        <ChipPill chips={player.stack} />
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        {player.cards.map((card, index) =>
+          player.visibility === "SEEN" ? (
+            <PlayingCard card={card} flipped key={`${card.rank}-${card.suit}`} size="medium" />
+          ) : (
+            <CardBack key={index} size="medium" />
+          ),
+        )}
+      </div>
+
+      <div className="mt-3 grid grid-cols-[44px_1fr_44px] gap-2">
+        <button
+          className="secondary-action grid h-10 place-items-center disabled:opacity-45"
+          disabled={!canAct}
+          type="button"
+          onClick={() => setAmount((value) => Math.max(minimum, value - (player.visibility === "SEEN" ? 2 : 1)))}
+        >
+          <Minus size={16} />
+        </button>
+        <div className="control-field grid h-10 place-items-center text-center font-black text-white">
+          {selected} chips / {formatFlippingRupees(selected)}
+        </div>
+        <button
+          className="secondary-action grid h-10 place-items-center disabled:opacity-45"
+          disabled={!canAct}
+          type="button"
+          onClick={() => setAmount((value) => Math.min(maximum, value + (player.visibility === "SEEN" ? 2 : 1)))}
+        >
+          <Plus size={16} />
+        </button>
+      </div>
+
+      <div className="mt-3 grid grid-cols-4 gap-2">
+        <button
+          className="secondary-action h-11 text-xs font-semibold disabled:opacity-45"
+          disabled={!canSeeCards || actionPending}
+          type="button"
+          onClick={() => onAction({ type: "SEE_CARDS" })}
+        >
+          See Cards
+        </button>
+        <button
+          className="primary-action h-11 text-xs font-black disabled:opacity-45"
+          disabled={!canAct || !chaal}
+          type="button"
+          onClick={() => onAction({ type: "PLACE_CHAAL", amount: selected })}
+        >
+          Chaal
+        </button>
+        <button
+          className="danger-action h-11 text-xs font-semibold disabled:opacity-45"
+          disabled={!canAct}
+          type="button"
+          onClick={() => onAction({ type: "PACK" })}
+        >
+          Pack
+        </button>
+        <button
+          className="secondary-action h-11 text-xs font-semibold disabled:opacity-45"
+          disabled={!canAct}
+          type="button"
+          onClick={() => onAction(finalTwo ? { type: "REQUEST_SHOW" } : { type: "REQUEST_PACK_SHOW" })}
+        >
+          {finalTwo ? "Show" : "Pack Show"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FlippingResultPanel({ flipping }: { flipping: FlippingState }) {
+  const result = flipping.lastShow;
+
+  if (!result) {
+    return null;
+  }
+
+  return (
+    <div className="pointer-events-none absolute inset-x-4 top-4 z-30 mx-auto max-w-xl rounded-md border border-[#f5d77d]/35 bg-black/72 p-4 text-center shadow-2xl backdrop-blur">
+      <p className="text-xs font-bold uppercase text-[#f5d77d]">
+        {result.mode === "FLIPPING_MOFLESS" ? "Lowest hand wins" : "Highest hand wins"}
+      </p>
+      <h2 className="mt-1 text-lg font-black text-white">{result.explanation}</h2>
+    </div>
+  );
+}
+
+function FlippingSidebar({ flipping }: { flipping: FlippingState }) {
+  return (
+    <div className="flex h-full flex-col">
+      <h2 className="text-sm font-bold uppercase text-white/55">
+        {flipping.mode === "CLASSIC_FLIPPING" ? "Classic Flipping" : "Flipping Mofless"}
+      </h2>
+      <div className="mt-3 rounded-md border border-white/10 bg-black/20 p-3">
+        <p className="text-xs font-bold uppercase text-[#f5d77d]">Current stake</p>
+        <p className="text-lg font-black text-white">{flipping.currentBlindEquivalent} blind eq.</p>
+        <p className="mt-1 text-xs text-white/45">Seen players pay {flipping.currentBlindEquivalent * 2} chips</p>
+      </div>
+      <div className="mt-3 rounded-md border border-white/10 bg-black/20 p-3">
+        <p className="text-xs font-bold uppercase text-[#f5d77d]">Joker history</p>
+        <p className="mt-1 text-xs text-white/60">{flipping.jokerReplacementNumber} replacements</p>
+        <p className="mt-1 text-xs text-white/45">{flipping.jokersLocked ? "Locked at final two" : "Replacing on pack"}</p>
+      </div>
+      <div className="mt-4 space-y-2 overflow-auto">
+        {flipping.actionLog.map((event) => (
           <p className="rounded-md bg-white/6 px-3 py-2 text-sm text-white/70" key={event}>
             {event}
           </p>
