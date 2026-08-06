@@ -20,11 +20,19 @@ import * as PlayingCards from "@letele/playing-cards/dist/index.esm.js";
 import {
   createMultiplayerRoom,
   cleanupOwnStaleMemberships,
+  createPrivateReveals,
   ensureAnonymousSession,
   joinMultiplayerRoom,
+  listPendingGameActions,
+  loadPrivateHand,
+  loadPrivateReveals,
+  markGameActionProcessed,
   leaveMultiplayerRoom,
   saveMultiplayerSnapshot,
+  savePrivateHands,
+  stripPrivateHands,
   subscribeToMultiplayerRoom,
+  submitGameAction,
   touchMultiplayerMembership,
   withMultiplayerTimeout,
 } from "@/lib/multiplayer-room";
@@ -42,6 +50,7 @@ import {
   buyInChips,
   canUserAct,
   createTableFromPlayers,
+  createShowRequest,
   foldPlayer,
   getActiveCenter,
   getActivePlayers,
@@ -80,6 +89,7 @@ type Overlay = {
 };
 
 type PendingShow = {
+  requestId: string;
   requesterId: string;
   defenderId: string;
   label: "Show" | "Back show";
@@ -163,11 +173,149 @@ export function GameShell() {
   const normalBotRequestStageRef = useRef<NormalBotRequestStage>("idle");
   const normalBotBuyInTriggerRef = useRef<number | null>(null);
   const applyingRemoteSnapshotRef = useRef(false);
+  const canonicalRevisionRef = useRef(0);
+  const processingActionIdsRef = useRef(new Set<string>());
+  const tableRef = useRef<TableState | null>(null);
+  const pendingActionRevisionRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    tableRef.current = table;
+  }, [table]);
 
   const showOverlay = useCallback((text: string, tone: Overlay["tone"]) => {
     setOverlay({ text, tone });
     window.setTimeout(() => setOverlay(null), 2600);
   }, []);
+
+  useEffect(() => {
+    if (
+      actionPending &&
+      pendingActionRevisionRef.current !== null &&
+      table &&
+      table.revision > pendingActionRevisionRef.current
+    ) {
+      pendingActionRevisionRef.current = null;
+      setActionPending(false);
+    }
+  }, [actionPending, table]);
+
+  function dispatchGameAction(actionType: string, payload: Record<string, unknown> = {}) {
+    if (!table || actionPending) {
+      return false;
+    }
+
+    if (!room?.code || !onlineUserId || !isSupabaseConfigured()) {
+      return false;
+    }
+
+    setActionPending(true);
+    pendingActionRevisionRef.current = table.revision;
+    void submitGameAction(room.code, onlineUserId, {
+      actionType,
+      payload,
+      baseRevision: table.revision,
+    }).catch((error) => {
+      pendingActionRevisionRef.current = null;
+      setActionPending(false);
+      showOverlay(error instanceof Error ? error.message : "Action failed", "warn");
+    });
+    return true;
+  }
+
+  useEffect(() => {
+    if (!room?.code || !onlineUserId || room.hostId !== currentPlayerId || !table) {
+      return;
+    }
+
+    let cancelled = false;
+    const processActions = async () => {
+      const actions = await listPendingGameActions(room.code).catch(() => []);
+
+      for (const action of actions) {
+        if (cancelled || !action.id || processingActionIdsRef.current.has(action.id)) {
+          continue;
+        }
+
+        processingActionIdsRef.current.add(action.id);
+        const current = tableRef.current;
+        const actorId = action.actorUserId ? `p-${action.actorUserId}` : "";
+
+        if (!current || action.baseRevision !== current.revision) {
+          await markGameActionProcessed(action.id, { ok: false, reason: "stale_revision" }).catch(() => undefined);
+          continue;
+        }
+
+        let next = current;
+        const requestId = String(action.payload.requestId ?? action.id);
+
+        if (action.actionType === "chaal") {
+          next = playChaal(current, actorId);
+        } else if (action.actionType === "fold") {
+          next = foldPlayer(current, actorId);
+        } else if (action.actionType === "show_request") {
+          next = createShowRequest(
+            current,
+            actorId,
+            requestId,
+            action.payload.label === "Show" ? "Show" : "Back show",
+          );
+        } else if (action.actionType === "show_response") {
+          if (current.pendingShow?.defenderId !== actorId) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "not_defender" }).catch(() => undefined);
+            continue;
+          }
+          next = respondToShowRequest(
+            current,
+            current.pendingShow.requesterId,
+            action.payload.response === "accept" ? "accept" : "decline",
+          );
+        }
+
+        if (next === current) {
+          await markGameActionProcessed(action.id, { ok: false, reason: "invalid_action" }).catch(() => undefined);
+          continue;
+        }
+
+        next = { ...next, revision: current.revision + 1 };
+        canonicalRevisionRef.current = next.revision;
+        setPendingShow(
+          next.pendingShow
+            ? {
+                requestId: next.pendingShow.requestId,
+                requesterId: next.pendingShow.requesterId,
+                defenderId: next.pendingShow.defenderId,
+                label: next.pendingShow.label,
+              }
+            : null,
+        );
+
+        if (next.privateReveal) {
+          const revealPlayers = next.privateReveal.playerIds
+            .map((playerId) => next.players.find((player) => player.id === playerId))
+            .filter(Boolean)
+            .map((player) => ({ playerId: player!.id, hand: player!.hand }));
+          const revealRows = next.privateReveal.viewerIds.flatMap((viewerId) =>
+            revealPlayers.map((player) => ({
+              userId: viewerId.replace(/^p-/, ""),
+              playerId: player.playerId,
+              hand: player.hand,
+            })),
+          );
+          await createPrivateReveals(room.code, next.privateReveal.requestId, revealRows).catch(() => undefined);
+        }
+
+        setTable(next);
+        await markGameActionProcessed(action.id, { ok: true, revision: next.revision }).catch(() => undefined);
+      }
+    };
+
+    void processActions();
+    const interval = window.setInterval(() => void processActions(), 350);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId, table]);
 
   useEffect(() => {
     if (!room?.code) {
@@ -196,15 +344,71 @@ export function GameShell() {
     }
 
     const unsubscribe = subscribeToMultiplayerRoom(room.code, (snapshot) => {
+      const sharedTable = snapshot.table as unknown as TableState | null;
+
+      if (
+        sharedTable &&
+        room.hostId === currentPlayerId &&
+        sharedTable.revision <= canonicalRevisionRef.current
+      ) {
+        return;
+      }
+
       applyingRemoteSnapshotRef.current = true;
       setRoom(snapshot.room as unknown as RoomState);
-      setTable(
-        snapshot.table
-          ? { ...(snapshot.table as unknown as TableState), userId: currentPlayerId }
-          : null,
-      );
-      if (snapshot.table) {
+      if (sharedTable) {
+        const localTable = {
+          ...sharedTable,
+          userId: currentPlayerId,
+          players: sharedTable.players.map((player) => ({ ...player, hand: [] })),
+        };
+        setPendingShow(
+          sharedTable.pendingShow
+            ? {
+                requestId: sharedTable.pendingShow.requestId,
+                requesterId: sharedTable.pendingShow.requesterId,
+                defenderId: sharedTable.pendingShow.defenderId,
+                label: sharedTable.pendingShow.label,
+              }
+            : null,
+        );
+        setTable(localTable);
         setScreen("table");
+
+        void Promise.all([
+          loadPrivateHand(room.code, onlineUserId ?? ""),
+          loadPrivateReveals(room.code, onlineUserId ?? ""),
+        ])
+          .then(([hand, reveals]) => {
+            setTable((currentTable) => {
+              if (!currentTable || currentTable.revision !== sharedTable.revision) {
+                return currentTable;
+              }
+
+              const revealMap = new Map(reveals.map((reveal) => [reveal.playerId, reveal.hand]));
+              return {
+                ...currentTable,
+                privateReveal: reveals[0]
+                  ? {
+                      requestId: reveals[0].requestId,
+                      playerIds: reveals.map((reveal) => reveal.playerId),
+                      viewerIds: [currentPlayerId],
+                      expiresAt: Math.max(...reveals.map((reveal) => reveal.expiresAt)),
+                    }
+                  : undefined,
+                players: currentTable.players.map((player) => ({
+                  ...player,
+                  hand:
+                    player.id === currentPlayerId
+                      ? (hand as typeof player.hand)
+                      : (revealMap.get(player.id) as typeof player.hand | undefined) ?? [],
+                })),
+              };
+            });
+          })
+          .catch(() => undefined);
+      } else {
+        setTable(null);
       }
       window.setTimeout(() => {
         applyingRemoteSnapshotRef.current = false;
@@ -212,7 +416,7 @@ export function GameShell() {
     });
 
     return unsubscribe;
-  }, [currentPlayerId, room?.code]);
+  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId]);
 
   useEffect(() => {
     if (!room?.code || !onlineUserId || testRoomScenario) {
@@ -252,6 +456,32 @@ export function GameShell() {
     return () => window.clearInterval(interval);
   }, [table?.startAt]);
 
+  useEffect(() => {
+    if (!table?.privateReveal) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setTable((currentTable) => {
+        if (!currentTable?.privateReveal) {
+          return currentTable;
+        }
+
+        return {
+          ...currentTable,
+          privateReveal: undefined,
+          players: currentTable.players.map((player) =>
+            player.id === currentPlayerId || currentTable.revealedPlayerIds.includes(player.id)
+              ? player
+              : { ...player, hand: [] },
+          ),
+        };
+      });
+    }, Math.max(0, table.privateReveal.expiresAt - Date.now()));
+
+    return () => window.clearTimeout(timeout);
+  }, [currentPlayerId, table?.privateReveal]);
+
   const countdownRemaining = table?.startAt
     ? Math.max(0, table.startAt - countdownNow) > 0
       ? Math.ceil((table.startAt - countdownNow) / 1000)
@@ -259,21 +489,34 @@ export function GameShell() {
     : null;
 
   useEffect(() => {
-    if (!room?.code || !onlineUserId || applyingRemoteSnapshotRef.current) {
+    if (
+      !room?.code ||
+      !onlineUserId ||
+      !table ||
+      room.hostId !== currentPlayerId ||
+      applyingRemoteSnapshotRef.current
+    ) {
       return;
     }
 
+    const revision = Math.max(table.revision, canonicalRevisionRef.current) + 1;
+    canonicalRevisionRef.current = revision;
+    const canonicalTable = { ...table, revision };
     const timeout = window.setTimeout(() => {
-      void saveMultiplayerSnapshot(room.code, {
-        room: room as unknown as Record<string, unknown>,
-        table: table as unknown as Record<string, unknown> | null,
-      }).catch(() => {
-        showOverlay("Online sync paused", "warn");
-      });
+      void Promise.all([
+        saveMultiplayerSnapshot(
+          room.code,
+          stripPrivateHands({
+            room: room as unknown as Record<string, unknown>,
+            table: canonicalTable as unknown as Record<string, unknown>,
+          }),
+        ),
+        savePrivateHands(room.code, canonicalTable.players),
+      ]).catch(() => showOverlay("Online sync paused", "warn"));
     }, 180);
 
     return () => window.clearTimeout(timeout);
-  }, [onlineUserId, room, showOverlay, table]);
+  }, [currentPlayerId, onlineUserId, room, showOverlay, table]);
 
   useEffect(() => {
     if (!table) {
@@ -396,6 +639,7 @@ export function GameShell() {
 
           if (defender) {
             setPendingShow({
+              requestId: `bot-show-${currentTable.actionCount}`,
               requesterId: bot.id,
               defenderId: defender.id,
               label: "Show",
@@ -789,6 +1033,12 @@ export function GameShell() {
 
     const revealIds = [requester?.id, defender?.id].filter(Boolean) as string[];
     const label = active.length === 2 ? "Show" : "Back show";
+
+    if (dispatchGameAction("show_request", { label, requestId: `show-${Date.now()}` })) {
+      showOverlay(`${label} requested`, "neutral");
+      return;
+    }
+
     showOverlay(`${label} requested`, "neutral");
 
     window.setTimeout(() => {
@@ -852,6 +1102,11 @@ export function GameShell() {
       return;
     }
 
+    if (dispatchGameAction("chaal")) {
+      showOverlay("Chaal sent", "good");
+      return;
+    }
+
     setActionPending(true);
     showOverlay("Chaal", "good");
     window.setTimeout(() => {
@@ -882,6 +1137,12 @@ export function GameShell() {
     }
 
     setPendingFold(false);
+
+    if (dispatchGameAction("fold")) {
+      showOverlay("Fold sent", "warn");
+      return;
+    }
+
     setActionPending(true);
     showOverlay("Fold confirmed", "warn");
     window.setTimeout(() => {
@@ -898,6 +1159,13 @@ export function GameShell() {
     }
 
     const request = pendingShow;
+
+    if (dispatchGameAction("show_response", { response })) {
+      setPendingShow(null);
+      showOverlay(response === "accept" ? "Show accepted" : "Show declined", response === "accept" ? "good" : "warn");
+      return;
+    }
+
     setActionPending(true);
 
     if (response === "decline") {
@@ -1298,7 +1566,7 @@ export function GameShell() {
               {chipMotion ? <ChipMotionOverlay motion={chipMotion} /> : null}
               <OvalTable
                 center={center}
-                currentPlayerId={currentPlayer?.id}
+                currentPlayerId={table.userId}
                 table={table}
                 temporaryRevealIds={temporaryRevealIds}
                 turnRemainingMs={turnRemainingMs}
@@ -1742,6 +2010,15 @@ function OvalTable({
       </div>
 
       {table.players.map((player, index) => (
+        (() => {
+          const privateRevealVisible = Boolean(
+            table.privateReveal &&
+              table.privateReveal.expiresAt > Date.now() &&
+              table.privateReveal.viewerIds.includes(currentPlayerId ?? "") &&
+              table.privateReveal.playerIds.includes(player.id),
+          );
+
+          return (
         <Seat
           currentPlayerId={currentPlayerId}
           dealer={table.players[table.dealerIndex]?.id === player.id}
@@ -1754,12 +2031,15 @@ function OvalTable({
           revealed={
             player.id === table.userId ||
             table.revealedPlayerIds.includes(player.id) ||
-            temporaryRevealIds.includes(player.id)
+            temporaryRevealIds.includes(player.id) ||
+            privateRevealVisible
           }
           timerActive={currentPlayerId === player.id && table.phase === "playing"}
           timerKey={`${table.handNumber}-${table.actionCount}-${table.turnIndex}`}
           turnRemainingMs={turnRemainingMs}
         />
+          );
+        })()
       ))}
     </section>
   );
