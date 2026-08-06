@@ -23,6 +23,7 @@ import {
   joinMultiplayerRoom,
   saveMultiplayerSnapshot,
   subscribeToMultiplayerRoom,
+  withMultiplayerTimeout,
 } from "@/lib/multiplayer-room";
 import { isSupabaseConfigured } from "@/lib/supabase-client";
 
@@ -137,6 +138,8 @@ export function GameShell() {
   const [incomingChipRequest, setIncomingChipRequest] = useState<IncomingChipRequest | null>(null);
   const [onlineUserId, setOnlineUserId] = useState<string | null>(null);
   const [joinPending, setJoinPending] = useState(false);
+  const [lobbyPending, setLobbyPending] = useState(false);
+  const [pendingOnlineRoom, setPendingOnlineRoom] = useState<RoomState | null>(null);
   const [countdownNow, setCountdownNow] = useState(() => Date.now());
   const [turnRemainingMs, setTurnRemainingMs] = useState(
     AFLATOON_RULES.turnTimerSeconds * 1000,
@@ -474,6 +477,7 @@ export function GameShell() {
         }
 
         setOnlineUserId(userId);
+        setPendingOnlineRoom(joined.snapshot.room as unknown as RoomState);
         setRoomCode(code);
         setFormError("");
         setScreen("buy-in");
@@ -497,82 +501,79 @@ export function GameShell() {
   }
 
   async function enterLobby() {
-    let authenticatedUserId = onlineUserId;
+    if (lobbyPending) {
+      return;
+    }
 
-    if (isSupabaseConfigured()) {
-      try {
-        authenticatedUserId = await ensureAnonymousSession();
+    setLobbyPending(true);
+    setFormError("");
+
+    try {
+      let authenticatedUserId = onlineUserId;
+
+      if (isSupabaseConfigured()) {
+        authenticatedUserId = await withMultiplayerTimeout(
+          ensureAnonymousSession(),
+          "Supabase sign-in timed out. Please try again.",
+        );
         setOnlineUserId(authenticatedUserId);
-      } catch {
-        showOverlay("Online room unavailable; using local room", "warn");
       }
-    }
 
-    const playerId = authenticatedUserId ? `p-${authenticatedUserId}` : localPlayerId;
-    const player: LobbyPlayer = {
-      id: playerId,
-      name: readPlayerName(),
-      chips: buyIn,
-      isHost: roomMode === "create",
-    };
-    const existingRoom = readRoom(roomCode);
-    let nextRoom: RoomState;
-
-    if (roomMode === "create") {
-      nextRoom = {
-        code: roomCode,
-        hostId: player.id,
-        players: [player],
+      const playerId = authenticatedUserId ? `p-${authenticatedUserId}` : localPlayerId;
+      const player: LobbyPlayer = {
+        id: playerId,
+        name: readPlayerName(),
+        chips: buyIn,
+        isHost: roomMode === "create",
       };
-    } else {
-      let onlineRoom: RoomState | null = null;
+      const existingRoom = readRoom(roomCode);
+      let nextRoom: RoomState;
 
-      if (authenticatedUserId && isSupabaseConfigured()) {
-        try {
-          const joined = await joinMultiplayerRoom(roomCode, {
-            id: playerId,
-            name: player.name,
-            chips: player.chips,
-          });
-          onlineRoom = joined?.snapshot.room as unknown as RoomState;
-        } catch (error) {
-          setFormError(
-            error instanceof Error ? error.message : `Room ${roomCode} could not be joined.`,
+      if (roomMode === "create") {
+        nextRoom = {
+          code: roomCode,
+          hostId: player.id,
+          players: [player],
+        };
+
+        if (authenticatedUserId && isSupabaseConfigured()) {
+          await withMultiplayerTimeout(
+            createMultiplayerRoom(roomCode, player.id, {
+              room: nextRoom as unknown as Record<string, unknown>,
+              table: null,
+            }),
+            "Room creation timed out. Please try again.",
           );
-          return;
         }
+      } else {
+        const onlineRoom = pendingOnlineRoom?.code === roomCode ? pendingOnlineRoom : null;
+        const baseRoom = isSupabaseConfigured() ? onlineRoom : existingRoom;
+
+        if (!baseRoom) {
+          throw new Error(`Room ${roomCode} was not found online. Go back and check the code.`);
+        }
+
+        nextRoom = upsertPlayer(baseRoom, { ...player, isHost: baseRoom.hostId === player.id });
       }
 
-      const baseRoom = isSupabaseConfigured() ? onlineRoom : existingRoom;
-
-      if (!baseRoom) {
-        setFormError(`Room ${roomCode} was not found online.`);
-        return;
-      }
-
-      nextRoom = upsertPlayer(baseRoom, { ...player, isHost: baseRoom.hostId === player.id });
+      saveRoom(nextRoom);
+      setPendingOnlineRoom(null);
+      setRoom(nextRoom);
+      setTable(null);
+      setSessionEnded(false);
+      setChipRequests([]);
+      setTestRoomScenario(null);
+      setIncomingChipRequest(null);
+      normalBotRequestStageRef.current = "idle";
+      normalBotBuyInTriggerRef.current = null;
+      setScreen("lobby");
+    } catch (error) {
+      setFormError(
+        error instanceof Error ? error.message : "Could not enter the lobby. Please try again.",
+      );
+    } finally {
+      setLobbyPending(false);
     }
-
-    saveRoom(nextRoom);
-    if (authenticatedUserId && isSupabaseConfigured() && roomMode === "create") {
-      try {
-        await createMultiplayerRoom(roomCode, player.id, {
-          room: nextRoom as unknown as Record<string, unknown>,
-          table: null,
-        });
-      } catch {
-        showOverlay("Could not publish this room online", "warn");
-      }
-    }
-    setRoom(nextRoom);
-    setTable(null);
-    setSessionEnded(false);
-    setChipRequests([]);
-    setTestRoomScenario(null);
-    setIncomingChipRequest(null);
-    normalBotRequestStageRef.current = "idle";
-    normalBotBuyInTriggerRef.current = null;
-    setScreen("lobby");
   }
 
   function enterTestRoom(scenario: Exclude<TestRoomScenario, null>) {
@@ -1091,9 +1092,9 @@ export function GameShell() {
               </div>
             </div>
 
-            <PrimaryButton onClick={enterLobby}>
+            <PrimaryButton onClick={enterLobby} disabled={lobbyPending}>
               <Coins size={18} />
-              Enter Lobby
+              {lobbyPending ? "Joining..." : "Enter Lobby"}
             </PrimaryButton>
           </section>
         </section>
