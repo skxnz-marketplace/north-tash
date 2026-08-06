@@ -13,6 +13,25 @@ type RoomRow = {
   state: MultiplayerSnapshot;
 };
 
+const MULTIPLAYER_TIMEOUT_MS = 10000;
+
+export function withMultiplayerTimeout<T>(promise: Promise<T>, message: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = window.setTimeout(() => reject(new Error(message)), MULTIPLAYER_TIMEOUT_MS);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        window.clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function ensureAnonymousSession() {
   const supabase = getSupabaseBrowserClient();
 
@@ -167,6 +186,37 @@ export function subscribeToMultiplayerRoom(
     return () => undefined;
   }
 
+  let lastSnapshot = "";
+  const publish = (nextSnapshot: MultiplayerSnapshot | null) => {
+    if (!nextSnapshot?.room) {
+      return;
+    }
+
+    const serialized = JSON.stringify(nextSnapshot);
+
+    if (serialized === lastSnapshot) {
+      return;
+    }
+
+    lastSnapshot = serialized;
+    onSnapshot(nextSnapshot);
+  };
+
+  const refreshSnapshot = async () => {
+    const { data, error } = await supabase
+      .from("game_rooms")
+      .select("code, host_user_id, state")
+      .eq("code", code)
+      .maybeSingle<RoomRow>();
+
+    if (!error) {
+      publish(data?.state ?? null);
+    }
+  };
+
+  void refreshSnapshot();
+  const poller = window.setInterval(() => void refreshSnapshot(), 1200);
+
   let channel: RealtimeChannel | null = supabase
     .channel(`north-tash-room-${code}`)
     .on(
@@ -175,14 +225,13 @@ export function subscribeToMultiplayerRoom(
       (payload) => {
         const nextSnapshot = (payload.new as RoomRow).state;
 
-        if (nextSnapshot?.room) {
-          onSnapshot(nextSnapshot);
-        }
+        publish(nextSnapshot);
       },
     )
     .subscribe();
 
   return () => {
+    window.clearInterval(poller);
     if (channel) {
       void supabase.removeChannel(channel);
       channel = null;
