@@ -47,6 +47,19 @@ export interface TransferRequest {
   amount: number;
 }
 
+export interface TransferLedgerEntry {
+  id: string;
+  fromPlayerId: string;
+  toPlayerId: string;
+  chips: number;
+}
+
+export interface PlayerSettlement {
+  fromPlayerId: string;
+  toPlayerId: string;
+  chips: number;
+}
+
 export interface TableState {
   roomCode: string;
   userId: string;
@@ -79,6 +92,7 @@ export interface TableState {
   };
   pendingBuyInRequests?: BuyInRequest[];
   pendingTransferRequests?: TransferRequest[];
+  transferLedger?: TransferLedgerEntry[];
 }
 
 const SEATS = ["South", "West", "North", "East", "Far West", "Far East", "Top"];
@@ -190,6 +204,7 @@ export function dealNewHand(input: {
   seed?: number;
   openingLog?: string;
   startAt?: number;
+  transferLedger?: TransferLedgerEntry[];
 }): TableState {
   const seatedPlayers = input.players.filter((player) => player.status !== "standing");
 
@@ -261,6 +276,7 @@ export function dealNewHand(input: {
     ],
     startAt: input.startAt,
     revision: 0,
+    transferLedger: input.transferLedger?.map((entry) => ({ ...entry })) ?? [],
   };
 }
 
@@ -509,6 +525,7 @@ export function transferPlayerChips(
   toPlayerId: string,
   requestedChips: number,
   approvedChips: number,
+  transferId?: string,
 ): TableState {
   if (!Number.isInteger(requestedChips) || requestedChips < 1) {
     return appendLog(state, "Transfer request must be a whole number.", "warn");
@@ -532,6 +549,15 @@ export function transferPlayerChips(
   receiver.chips += approved;
   giver.transferBalanceChips -= approved;
   receiver.transferBalanceChips += approved;
+  nextState.transferLedger = [
+    ...(nextState.transferLedger ?? []),
+    {
+      id: transferId ?? `transfer-${Date.now()}-${nextState.transferLedger?.length ?? 0}`,
+      fromPlayerId: giver.id,
+      toPlayerId: receiver.id,
+      chips: approved,
+    },
+  ];
 
   return appendLog(
     nextState,
@@ -644,7 +670,113 @@ export function resolveTransferRequest(
     request.requesterId,
     request.amount,
     response === "accept" ? request.amount : 0,
+    request.id,
   );
+}
+
+export function calculatePlayerSettlements(players: TablePlayer[]): PlayerSettlement[] {
+  const debtors = players
+    .map((player) => ({
+      id: player.id,
+      chips: Math.max(
+        0,
+        -(player.chips - player.totalBuyInChips - player.transferBalanceChips - player.shortChips),
+      ),
+    }))
+    .filter((balance) => balance.chips > 0);
+  const creditors = players
+    .map((player) => ({
+      id: player.id,
+      chips: Math.max(
+        0,
+        player.chips - player.totalBuyInChips - player.transferBalanceChips - player.shortChips,
+      ),
+    }))
+    .filter((balance) => balance.chips > 0);
+  const settlements: PlayerSettlement[] = [];
+  let debtorIndex = 0;
+  let creditorIndex = 0;
+
+  while (debtorIndex < debtors.length && creditorIndex < creditors.length) {
+    const debtor = debtors[debtorIndex];
+    const creditor = creditors[creditorIndex];
+    const chips = Math.min(debtor.chips, creditor.chips);
+
+    settlements.push({ fromPlayerId: debtor.id, toPlayerId: creditor.id, chips });
+    debtor.chips -= chips;
+    creditor.chips -= chips;
+
+    if (debtor.chips === 0) debtorIndex += 1;
+    if (creditor.chips === 0) creditorIndex += 1;
+  }
+
+  return settlements;
+}
+
+export function calculateTransferObligations(
+  ledger: TransferLedgerEntry[],
+): PlayerSettlement[] {
+  const pairBalances = new Map<string, { firstId: string; secondId: string; chips: number }>();
+
+  for (const entry of ledger) {
+    if (entry.chips <= 0 || entry.fromPlayerId === entry.toPlayerId) continue;
+
+    const [firstId, secondId] = [entry.fromPlayerId, entry.toPlayerId].sort();
+    const key = `${firstId}:${secondId}`;
+    const current = pairBalances.get(key) ?? { firstId, secondId, chips: 0 };
+    current.chips += entry.toPlayerId === firstId ? entry.chips : -entry.chips;
+    pairBalances.set(key, current);
+  }
+
+  return [...pairBalances.values()]
+    .filter((balance) => balance.chips !== 0)
+    .map((balance) => ({
+      fromPlayerId: balance.chips > 0 ? balance.firstId : balance.secondId,
+      toPlayerId: balance.chips > 0 ? balance.secondId : balance.firstId,
+      chips: Math.abs(balance.chips),
+    }));
+}
+
+export function netPlayerSettlements(settlements: PlayerSettlement[]): PlayerSettlement[] {
+  const balances = new Map<string, number>();
+
+  for (const settlement of settlements) {
+    if (settlement.chips <= 0 || settlement.fromPlayerId === settlement.toPlayerId) continue;
+
+    balances.set(
+      settlement.fromPlayerId,
+      (balances.get(settlement.fromPlayerId) ?? 0) - settlement.chips,
+    );
+    balances.set(
+      settlement.toPlayerId,
+      (balances.get(settlement.toPlayerId) ?? 0) + settlement.chips,
+    );
+  }
+
+  const debtors = [...balances]
+    .filter(([, chips]) => chips < 0)
+    .map(([id, chips]) => ({ id, chips: -chips }));
+  const creditors = [...balances]
+    .filter(([, chips]) => chips > 0)
+    .map(([id, chips]) => ({ id, chips }));
+  const netSettlements: PlayerSettlement[] = [];
+  let debtorIndex = 0;
+  let creditorIndex = 0;
+
+  while (debtorIndex < debtors.length && creditorIndex < creditors.length) {
+    const debtor = debtors[debtorIndex];
+    const creditor = creditors[creditorIndex];
+    const chips = Math.min(debtor.chips, creditor.chips);
+
+    netSettlements.push({ fromPlayerId: debtor.id, toPlayerId: creditor.id, chips });
+    debtor.chips -= chips;
+    creditor.chips -= chips;
+
+    if (debtor.chips === 0) debtorIndex += 1;
+    if (creditor.chips === 0) creditorIndex += 1;
+  }
+
+  return netSettlements;
 }
 
 export function standPlayer(state: TableState, playerId: string): TableState {
@@ -676,6 +808,7 @@ export function startNextHand(state: TableState, seed = Date.now()) {
     handNumber: state.handNumber + 1,
     carryOverPot: state.carryOverPot,
     seed,
+    transferLedger: state.transferLedger,
   });
 }
 
@@ -855,6 +988,7 @@ function cloneState(state: TableState): TableState {
       : undefined,
     pendingBuyInRequests: state.pendingBuyInRequests?.map((request) => ({ ...request })),
     pendingTransferRequests: state.pendingTransferRequests?.map((request) => ({ ...request })),
+    transferLedger: state.transferLedger?.map((entry) => ({ ...entry })),
   };
 }
 
