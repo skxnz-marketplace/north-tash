@@ -1,36 +1,33 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# North Tash
+
+Mobile-first Aflatoon game prototype built with Next.js, TypeScript, and Tailwind CSS.
 
 ## Getting Started
 
-First, run the development server:
+Run the local development server:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
 pnpm dev
-# or
-bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Checks
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+pnpm test
+pnpm lint
+pnpm typecheck
+```
 
-## Learn More
+## Current Scope
 
-To learn more about Next.js, take a look at the following resources:
+- Landing, private 3-digit local room, buy-in, lobby, one test bot, and host controls.
+- Mobile oval table with SVG playing cards, staggered dealing, poker chips, pot, centre history, mode, jokers, and live 15-second timer.
+- Automatic chaal/centre flip, back show, private accept/decline prompt, decline costs, forced acceptance, hand reset, and rotating dealer.
+- Rebuys, host approvals, player transfers, public shorts, session end, and downloadable CSV tally.
+- Tested Aflatoon rules engine for normal rankings, Mufflis, sequential jokers, and special show ties.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Local MVP Boundary
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Room state currently uses browser storage, so it is suitable for local UI and rules testing only. Real phones, secure hidden cards, reconnection, and server-owned timers/decks require the planned realtime backend.
