@@ -1,6 +1,6 @@
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
-import { getSupabaseBrowserClient } from "./supabase-client";
+import { getSupabaseBrowserClient } from "./supabase-client.ts";
 
 export type MultiplayerSnapshot = {
   room: Record<string, unknown>;
@@ -14,6 +14,15 @@ export type GameAction = {
   baseRevision: number;
   actorUserId?: string;
   createdAt?: string;
+};
+
+type GameActionRow = {
+  id: string;
+  action_type: string;
+  payload: Record<string, unknown> | null;
+  base_revision: number;
+  actor_user_id: string;
+  created_at: string;
 };
 
 export type PrivateReveal = {
@@ -31,6 +40,17 @@ type RoomRow = {
 };
 
 const MULTIPLAYER_TIMEOUT_MS = 10000;
+
+export function mapGameActionRow(row: GameActionRow): GameAction {
+  return {
+    id: row.id,
+    actionType: row.action_type,
+    payload: row.payload ?? {},
+    baseRevision: row.base_revision,
+    actorUserId: row.actor_user_id,
+    createdAt: row.created_at,
+  };
+}
 
 export function withMultiplayerTimeout<T>(promise: Promise<T>, message: string) {
   return new Promise<T>((resolve, reject) => {
@@ -214,13 +234,13 @@ export async function submitGameAction(
       base_revision: action.baseRevision,
     })
     .select("id, action_type, payload, base_revision, actor_user_id, created_at")
-    .single<GameAction>();
+    .single<GameActionRow>();
 
   if (error) {
     throw error;
   }
 
-  return data;
+  return mapGameActionRow(data);
 }
 
 export async function listPendingGameActions(code: string) {
@@ -237,13 +257,13 @@ export async function listPendingGameActions(code: string) {
     .is("processed_at", null)
     .order("created_at", { ascending: true })
     .limit(20)
-    .returns<GameAction[]>();
+    .returns<GameActionRow[]>();
 
   if (error) {
     throw error;
   }
 
-  return data ?? [];
+  return (data ?? []).map(mapGameActionRow);
 }
 
 export async function markGameActionProcessed(id: string, result: Record<string, unknown>) {
