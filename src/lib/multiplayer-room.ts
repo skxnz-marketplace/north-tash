@@ -70,7 +70,10 @@ export async function createMultiplayerRoom(
   return userId;
 }
 
-export async function joinMultiplayerRoom(code: string, playerId: string) {
+export async function joinMultiplayerRoom(
+  code: string,
+  player: { id: string; name: string; chips: number },
+) {
   const supabase = getSupabaseBrowserClient();
   const userId = await ensureAnonymousSession();
 
@@ -79,7 +82,7 @@ export async function joinMultiplayerRoom(code: string, playerId: string) {
   }
 
   const { error: memberError } = await supabase.from("game_room_members").upsert(
-    { room_code: code, user_id: userId, player_id: playerId },
+    { room_code: code, user_id: userId, player_id: player.id },
     { onConflict: "room_code,user_id" },
   );
 
@@ -101,7 +104,43 @@ export async function joinMultiplayerRoom(code: string, playerId: string) {
     throw new Error(`Room ${code} was not found.`);
   }
 
-  return { userId, snapshot: room.state };
+  const currentRoom = room.state.room as {
+    code?: string;
+    players?: Array<{ id: string; name: string; chips: number; isHost?: boolean; isBot?: boolean }>;
+  };
+  const players = Array.isArray(currentRoom.players) ? currentRoom.players : [];
+
+  let nextSnapshot = room.state;
+
+  if (!players.some((currentPlayer) => currentPlayer.id === player.id)) {
+    nextSnapshot = {
+      ...room.state,
+      room: {
+        ...currentRoom,
+        players: [
+          ...players,
+          {
+            id: player.id,
+            name: player.name,
+            chips: player.chips,
+            isHost: false,
+            isBot: false,
+          },
+        ],
+      },
+    };
+
+    const { error: snapshotError } = await supabase
+      .from("game_rooms")
+      .update({ state: nextSnapshot })
+      .eq("code", code);
+
+    if (snapshotError) {
+      throw snapshotError;
+    }
+  }
+
+  return { userId, snapshot: nextSnapshot };
 }
 
 export async function saveMultiplayerSnapshot(code: string, snapshot: MultiplayerSnapshot) {
