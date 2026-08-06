@@ -8,6 +8,7 @@ import {
   LogIn,
   LogOut,
   Menu,
+  Minus,
   Play,
   Plus,
   RotateCcw,
@@ -3491,16 +3492,35 @@ function TransferRequestModal({
 
         <label className="mt-4 block text-sm font-semibold text-white/70">
           Whole chips
-          <input
-            className="control-field mt-2 h-12 w-full px-3 text-white"
-            inputMode="numeric"
-            min={1}
-            type="number"
-            value={draft.amount}
-            onChange={(event) =>
-              onChange({ ...draft, amount: Math.max(1, Number(event.target.value) || 1) })
-            }
-          />
+          <div className="mt-2 grid grid-cols-[44px_1fr_44px] gap-2">
+            <button
+              aria-label="Decrease requested chips"
+              className="secondary-action grid h-12 place-items-center"
+              type="button"
+              onClick={() => onChange({ ...draft, amount: Math.max(1, draft.amount - 1) })}
+            >
+              <Minus size={18} />
+            </button>
+            <input
+              aria-label="Requested chips"
+              className="control-field h-12 w-full px-3 text-center font-black text-white"
+              inputMode="numeric"
+              min={1}
+              type="number"
+              value={draft.amount}
+              onChange={(event) =>
+                onChange({ ...draft, amount: Math.max(1, Number(event.target.value) || 1) })
+              }
+            />
+            <button
+              aria-label="Increase requested chips"
+              className="secondary-action grid h-12 place-items-center"
+              type="button"
+              onClick={() => onChange({ ...draft, amount: draft.amount + 1 })}
+            >
+              <Plus size={18} />
+            </button>
+          </div>
         </label>
 
         <button
