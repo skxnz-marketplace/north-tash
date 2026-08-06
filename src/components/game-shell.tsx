@@ -48,6 +48,8 @@ import {
 import type { Card, GameMode } from "@/lib/aflatoon";
 import {
   buyInChips,
+  calculatePlayerSettlements,
+  calculateTransferObligations,
   canUserAct,
   createTableFromPlayers,
   createShowRequest,
@@ -56,6 +58,7 @@ import {
   getActivePlayers,
   getCurrentPlayer,
   makeRoomCode,
+  netPlayerSettlements,
   playChaal,
   queueBuyInRequest,
   queueTransferRequest,
@@ -68,7 +71,13 @@ import {
   startNextHand,
   transferPlayerChips,
 } from "@/lib/local-game";
-import type { BuyInRequest, LogTone, TablePlayer, TableState } from "@/lib/local-game";
+import type {
+  BuyInRequest,
+  LogTone,
+  TablePlayer,
+  TableState,
+  TransferLedgerEntry,
+} from "@/lib/local-game";
 
 type Screen = "landing" | "room-code" | "buy-in" | "lobby" | "table";
 type RoomMode = "create" | "join";
@@ -173,6 +182,7 @@ export function normalizeSharedTable(value: unknown): TableState | null {
     pendingTransferRequests: Array.isArray(candidate.pendingTransferRequests)
       ? candidate.pendingTransferRequests
       : [],
+    transferLedger: Array.isArray(candidate.transferLedger) ? candidate.transferLedger : [],
   };
 }
 
@@ -2006,6 +2016,7 @@ export function GameShell() {
         open={sessionTallyOpen}
         players={table.players}
         potChips={table.pot}
+        transferLedger={table.transferLedger}
         onClose={() => setSessionTallyOpen(false)}
       />
       <TransferRequestModal
@@ -2368,9 +2379,9 @@ function OvalTable({
   }, [table.actionCount]);
 
   return (
-    <section className="relative mx-auto mb-2 h-[410px] w-full max-w-3xl sm:mb-4 sm:h-[560px]" ref={tableRef}>
-      <div className="absolute inset-x-0 top-4 bottom-4 rounded-[48%] border-[10px] border-[#5c3b20] bg-[radial-gradient(ellipse_at_center,#2f8b58_0%,#1d6740_48%,#11402a_100%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08),inset_0_28px_70px_rgba(255,255,255,0.07),0_28px_70px_rgba(0,0,0,0.42)] sm:inset-x-5" />
-      <div className="absolute inset-x-6 top-16 bottom-16 rounded-[48%] border border-[#d2a84b]/25 bg-black/10 sm:inset-x-16" />
+    <section className="relative mx-auto mb-2 h-[350px] w-full max-w-4xl sm:mb-4 sm:h-[470px]" ref={tableRef}>
+      <div className="absolute inset-x-0 top-12 bottom-12 rounded-[50%] border-[10px] border-[#5c3b20] bg-[radial-gradient(ellipse_at_center,#2f8b58_0%,#1d6740_48%,#11402a_100%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08),inset_0_28px_70px_rgba(255,255,255,0.07),0_28px_70px_rgba(0,0,0,0.42)] sm:inset-x-3 sm:top-6 sm:bottom-6" />
+      <div className="absolute inset-x-6 top-[100px] bottom-[100px] rounded-[50%] border border-[#d2a84b]/25 bg-black/10 sm:inset-x-14 sm:top-24 sm:bottom-24" />
       <div className="absolute left-1/2 top-[46%] w-[196px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/28 p-2 text-center shadow-xl shadow-black/25 backdrop-blur sm:top-[48%] sm:w-[288px] sm:p-3">
         <CenterDeck
           actionCount={table.actionCount}
@@ -2599,7 +2610,7 @@ function Seat({
         <SeatTimerBar key={timerKey} remainingMs={turnRemainingMs} />
       ) : null}
       {!isUser ? (
-        <div className="mt-1 flex justify-center gap-1">
+        <div className={`mt-1 flex justify-center ${revealed && player.hand.length === 3 ? "-space-x-3" : "-space-x-2"}`}>
           {displayedHand.map((card, cardIndex) => (
             <PlayingCard
               card={card}
@@ -2609,7 +2620,7 @@ function Seat({
               flipped={revealed && player.hand.length === 3}
               gsapDeal
               key={`${handNumber}-${player.id}-${card.rank}-${card.suit}-${cardIndex}`}
-              size="tiny"
+              size={revealed && player.hand.length === 3 ? "seat" : "tiny"}
             />
           ))}
         </div>
@@ -2833,7 +2844,7 @@ function ShowdownHandRow({
             key={`${label}-${card.rank}-${card.suit}-${index}`}
             showdown
             flipped
-            size="normal"
+            size="showdown"
           />
         ))}
       </div>
@@ -3139,10 +3150,18 @@ function PlayingCard({
   flipped?: boolean;
   gsapDeal?: boolean;
   showdown?: boolean;
-  size?: "tiny" | "normal" | "large";
+  size?: "tiny" | "seat" | "normal" | "large" | "showdown";
 }) {
   const dimensions =
-    size === "large" ? "h-[98px] w-[70px]" : size === "tiny" ? "h-[52px] w-[37px]" : "h-[88px] w-[63px]";
+    size === "showdown"
+      ? "h-[112px] w-[80px]"
+      : size === "large"
+        ? "h-[98px] w-[70px]"
+        : size === "seat"
+          ? "h-[60px] w-[43px] sm:h-[70px] sm:w-[50px]"
+          : size === "tiny"
+            ? "h-[52px] w-[37px]"
+            : "h-[88px] w-[63px]";
   const cardDeck = PlayingCards as Record<string, CardSvgComponent>;
   const CardAsset = cardDeck[cardAssetName(card)];
   const BackAsset = cardDeck.B1;
@@ -3258,11 +3277,13 @@ function SessionTallyModal({
   open,
   players,
   potChips,
+  transferLedger = [],
 }: {
   onClose: () => void;
   open: boolean;
   players: Array<LobbyPlayer | TablePlayer>;
   potChips: number;
+  transferLedger?: TransferLedgerEntry[];
 }) {
   if (!open) {
     return null;
@@ -3275,7 +3296,7 @@ function SessionTallyModal({
       "totalBuyInChips" in player ? player.totalBuyInChips : player.chips;
     const transferBalanceChips =
       "transferBalanceChips" in player ? player.transferBalanceChips : 0;
-    const netChips = chips - totalBuyInChips;
+    const netChips = chips - totalBuyInChips - transferBalanceChips - shortChips;
 
     return {
       id: player.id,
@@ -3287,31 +3308,46 @@ function SessionTallyModal({
       netChips,
       buyInRupees: rupeesForChips(totalBuyInChips),
       closingRupees: rupeesForChips(chips),
-      shortRupees: rupeesForChips(shortChips),
-      transferRupees: rupeesForChips(transferBalanceChips),
       netRupees: rupeesForChips(netChips),
     };
   });
   const totalBuyInChips = rows.reduce((total, row) => total + row.totalBuyInChips, 0);
   const totalClosingChips = rows.reduce((total, row) => total + row.chips, 0);
   const totalShortChips = rows.reduce((total, row) => total + row.shortChips, 0);
+  const tablePlayers = players.filter((player): player is TablePlayer => "hand" in player);
+  const playerNames = new Map(players.map((player) => [player.id, player.name]));
+  const gameSettlements = calculatePlayerSettlements(tablePlayers);
+  const transferObligations = calculateTransferObligations(transferLedger);
+  const settlementLines = netPlayerSettlements([
+    ...gameSettlements,
+    ...transferObligations,
+  ]).map((settlement) => settlementSentence(settlement, playerNames));
+  const transferLines = transferObligations.map((settlement) =>
+    settlementSentence(settlement, playerNames),
+  );
 
   function downloadTally() {
     const playerRows = rows
       .map(
         (row) => `<tr>
           <td><strong>${escapeHtml(row.name)}</strong></td>
-          <td>Rs ${row.buyInRupees}<br><small>${row.totalBuyInChips} chips</small></td>
-          <td>Rs ${row.closingRupees}<br><small>${row.chips} chips</small></td>
-          <td class="${row.netChips >= 0 ? "positive" : "negative"}">${row.netChips >= 0 ? "+" : ""}Rs ${row.netRupees}<br><small>${row.netChips >= 0 ? "+" : ""}${row.netChips} chips</small></td>
-          <td>Rs ${row.shortRupees}<br><small>${row.shortChips} short / borrowed</small></td>
-          <td>Rs ${row.transferRupees}<br><small>${row.transferBalanceChips} chips</small></td>
+          <td>Rs ${formatRupees(row.buyInRupees)}<br><small>${row.totalBuyInChips} chips</small></td>
+          <td>Rs ${formatRupees(row.closingRupees)}<br><small>${row.chips} chips</small></td>
+          <td class="${row.netChips >= 0 ? "positive" : "negative"}">${row.netChips >= 0 ? "+" : "-"}Rs ${formatRupees(Math.abs(row.netRupees))}<br><small>${row.netChips >= 0 ? "+" : ""}${row.netChips} chips</small></td>
         </tr>`,
       )
       .join("");
+    const settlementItems = settlementLines.length
+      ? settlementLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")
+      : potChips > 0
+        ? "<li>Finish the hand to calculate the final game settlement.</li>"
+        : "<li>Everyone is settled.</li>";
+    const transferItems = transferLines.length
+      ? transferLines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")
+      : "<li>No personal chip requests remain to settle.</li>";
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>North Tash Session Tally</title><style>
-      body{font-family:Arial,sans-serif;background:#f4f1e8;color:#172117;padding:32px;line-height:1.4}main{max-width:980px;margin:auto;background:#fff;padding:28px;border:1px solid #d9cda9}h1{margin:0 0 4px;color:#244b36}h2{margin-top:28px;color:#244b36}p{color:#596158}table{border-collapse:collapse;width:100%;margin-top:16px}th{background:#244b36;color:white;text-align:left}th,td{border:1px solid #d9ded7;padding:10px;vertical-align:top}tr:nth-child(even){background:#f6f8f4}small{color:#69736a}.positive{color:#13733b;font-weight:bold}.negative{color:#a42e35;font-weight:bold}.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.summary div{border:1px solid #d9ded7;padding:12px;background:#f6f8f4}.summary strong{display:block;font-size:20px}@media(max-width:700px){body{padding:12px}.summary{grid-template-columns:repeat(2,1fr)}table{font-size:12px}th,td{padding:6px}}
-    </style></head><body><main><h1>North Tash — Session Tally</h1><p>Readable settlement summary with buy-ins, closing stacks, profit/loss, shorts/borrowed chips and player transfers.</p><div class="summary"><div>Total buy-in<strong>${totalBuyInChips} chips</strong><small>Rs ${rupeesForChips(totalBuyInChips)}</small></div><div>Closing stacks<strong>${totalClosingChips} chips</strong><small>Rs ${rupeesForChips(totalClosingChips)}</small></div><div>Table pot<strong>${potChips} chips</strong><small>Rs ${rupeesForChips(potChips)}</small></div><div>Short / borrowed<strong>${totalShortChips} chips</strong><small>Rs ${rupeesForChips(totalShortChips)}</small></div></div><h2>Player settlement</h2><table><thead><tr><th>Player</th><th>Buy-in</th><th>Closing stack</th><th>Profit / loss</th><th>Short / borrowed</th><th>Transfers</th></tr></thead><tbody>${playerRows}</tbody></table><p>Accounted on table: ${totalClosingChips + potChips} chips, excluding unsettled short/borrowed obligations shown above.</p></main></body></html>`;
+      body{font-family:Arial,sans-serif;background:#f4f1e8;color:#172117;padding:32px;line-height:1.4}main{max-width:820px;margin:auto;background:#fff;padding:28px;border:1px solid #d9cda9}h1{margin:0 0 4px;color:#244b36}h2{margin-top:28px;color:#244b36}p{color:#596158}table{border-collapse:collapse;width:100%;margin-top:16px}th{background:#244b36;color:white;text-align:left}th,td{border:1px solid #d9ded7;padding:10px;vertical-align:top}tr:nth-child(even){background:#f6f8f4}small{color:#69736a}.positive{color:#13733b;font-weight:bold}.negative{color:#a42e35;font-weight:bold}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.summary div,li{border:1px solid #d9ded7;padding:12px;background:#f6f8f4}.summary strong{display:block;font-size:20px}ul{list-style:none;padding:0;display:grid;gap:8px}@media(max-width:700px){body{padding:12px}.summary{grid-template-columns:1fr}table{font-size:12px}th,td{padding:6px}}
+    </style></head><body><main><h1>North Tash - Session Tally</h1><p>Final player balances and clear payment instructions.</p><div class="summary"><div>Total buy-in<strong>${totalBuyInChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(totalBuyInChips))}</small></div><div>Closing stacks<strong>${totalClosingChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(totalClosingChips))}</small></div><div>Table pot<strong>${potChips} chips</strong><small>Rs ${formatRupees(rupeesForChips(potChips))}</small></div></div><h2>Who pays whom</h2><ul>${settlementItems}</ul><h2>Personal chip requests</h2><ul>${transferItems}</ul><h2>Player balances</h2><table><thead><tr><th>Player</th><th>Buy-in</th><th>Closing stack</th><th>Game balance</th></tr></thead><tbody>${playerRows}</tbody></table>${potChips > 0 ? `<p><strong>Rs ${formatRupees(rupeesForChips(potChips))} remains in the table pot.</strong> Finish the hand for an exact player settlement.</p>` : ""}</main></body></html>`;
     const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -3322,7 +3358,7 @@ function SessionTallyModal({
 
   return (
     <div className="fixed inset-0 z-[60] grid place-items-center bg-black/70 px-4">
-      <section className="w-full max-w-md rounded-md border border-white/12 bg-[#171b17] p-4 shadow-2xl shadow-black">
+      <section className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-md border border-white/12 bg-[#171b17] p-4 shadow-2xl shadow-black">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-xs uppercase text-[#e2b653]">Session End</p>
@@ -3338,7 +3374,33 @@ function SessionTallyModal({
           </button>
         </div>
 
-        <div className="mt-4 space-y-2">
+        <div className="mt-4 rounded-md border border-[#d2a84b]/35 bg-[#d2a84b]/8 p-3">
+          <p className="text-xs font-bold uppercase text-[#e2b653]">Who pays whom</p>
+          <div className="mt-2 space-y-2">
+            {settlementLines.length ? settlementLines.map((line) => (
+              <p className="rounded-md bg-black/25 px-3 py-2 text-sm font-bold text-white" key={line}>
+                {line}
+              </p>
+            )) : (
+              <p className="text-sm text-white/65">
+                {potChips > 0 ? "Finish the hand to calculate the final game settlement." : "Everyone is settled."}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {transferLines.length ? (
+          <div className="mt-3 rounded-md border border-white/10 bg-black/20 p-3">
+            <p className="text-xs font-bold uppercase text-white/50">Personal chip requests</p>
+            <div className="mt-2 space-y-1">
+              {transferLines.map((line) => (
+                <p className="text-sm font-semibold text-[#f5d77d]" key={line}>{line}</p>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-3 space-y-2">
           {rows.map((row) => (
             <div
               className="grid grid-cols-[1fr_auto] gap-3 rounded-md border border-white/10 bg-black/24 p-3"
@@ -3347,30 +3409,20 @@ function SessionTallyModal({
               <div>
                 <p className="font-bold text-white">{row.name}</p>
                 <p className="text-xs text-white/50">
-                  {row.chips} chips · Rs {row.closingRupees}
-                  {row.shortChips > 0
-                    ? ` · ${row.shortChips} short / borrowed (Rs ${row.shortRupees})`
-                    : ""}
+                  Buy-in Rs {formatRupees(row.buyInRupees)} · Closing Rs {formatRupees(row.closingRupees)}
                 </p>
               </div>
               <div className="text-right">
                 <p className={`font-black ${row.netChips >= 0 ? "text-[#8ce0a6]" : "text-[#ffaaaa]"}`}>
-                  {row.netChips >= 0 ? "+" : ""}{row.netChips} chips
+                  {row.netChips >= 0 ? "+" : "-"}Rs {formatRupees(Math.abs(row.netRupees))}
                 </p>
-                <p className="text-xs text-white/50">
-                  In {row.totalBuyInChips} · Out {row.chips}
-                </p>
-                {row.transferBalanceChips !== 0 ? (
-                  <p className="text-xs text-white/45">
-                    Transfers {row.transferBalanceChips > 0 ? "+" : ""}{row.transferBalanceChips}
-                  </p>
-                ) : null}
+                <p className="text-xs text-white/50">Game balance</p>
               </div>
             </div>
           ))}
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2 rounded-md border border-white/10 bg-black/24 p-3 text-sm sm:grid-cols-4">
+        <div className="mt-3 grid grid-cols-3 gap-2 rounded-md border border-white/10 bg-black/24 p-3 text-sm">
           <div>
             <p className="text-xs uppercase text-white/45">Total buy-in</p>
             <p className="font-black text-white">{totalBuyInChips} chips</p>
@@ -3383,14 +3435,16 @@ function SessionTallyModal({
             <p className="text-xs uppercase text-white/45">Table pot</p>
             <p className="font-black text-[#e2b653]">{potChips} chips</p>
           </div>
-          <div className="text-right">
-            <p className="text-xs uppercase text-white/45">Short / borrowed</p>
-            <p className="font-black text-[#ffaaaa]">{totalShortChips} chips</p>
-          </div>
         </div>
-        <p className="mt-2 text-center text-xs text-white/45">
-          Accounted: {totalClosingChips + potChips} of {totalBuyInChips} purchased chips
-        </p>
+        {potChips > 0 ? (
+          <p className="mt-2 rounded-md border border-[#d2a84b]/25 bg-[#d2a84b]/8 px-3 py-2 text-center text-xs text-[#f5d77d]">
+            Rs {formatRupees(rupeesForChips(potChips))} remains in the table pot. Finish the hand for exact settlement.
+          </p>
+        ) : totalShortChips > 0 ? (
+          <p className="mt-2 text-center text-xs text-white/45">
+            Unpaid table charges are included in the game balance.
+          </p>
+        ) : null}
 
         <button
           className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#d2a84b] text-sm font-black text-[#161812]"
@@ -3620,6 +3674,19 @@ function dealOriginForSeat(index: number, playerCount: number) {
 function tableSeatOrder(seat: string) {
   const order = ["South", "West", "North", "East", "Far West", "Far East", "Top"];
   return Math.max(0, order.indexOf(seat));
+}
+
+function settlementSentence(
+  settlement: { fromPlayerId: string; toPlayerId: string; chips: number },
+  playerNames: Map<string, string>,
+) {
+  const fromName = playerNames.get(settlement.fromPlayerId) ?? "Player";
+  const toName = playerNames.get(settlement.toPlayerId) ?? "Player";
+  return `${fromName} owes Rs ${formatRupees(rupeesForChips(settlement.chips))} to ${toName}`;
+}
+
+function formatRupees(value: number) {
+  return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(value);
 }
 
 function escapeHtml(value: string) {
