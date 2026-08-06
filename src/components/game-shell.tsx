@@ -519,50 +519,6 @@ export function GameShell() {
     setScreen("lobby");
   }
 
-  function enterTestRoom(scenario: Exclude<TestRoomScenario, null>) {
-    const name = readPlayerName();
-    const botIsHost = scenario === "bot-owner";
-    const bot: LobbyPlayer = {
-      id: botIsHost ? "test-room-bot-owner" : "test-room-bot-player",
-      name: botIsHost ? "Bot Room Owner" : "Bot Buyer",
-      chips: AFLATOON_RULES.startingChips,
-      isBot: true,
-      isHost: botIsHost,
-    };
-    const user: LobbyPlayer = {
-      id: localPlayerId,
-      name,
-      chips: buyIn,
-      isHost: !botIsHost,
-    };
-    const roomCode = botIsHost ? "901" : "902";
-    const nextRoom: RoomState = {
-      code: roomCode,
-      hostId: botIsHost ? bot.id : user.id,
-      players: botIsHost ? [bot, user] : [user, bot],
-    };
-
-    setTestRoomScenario(scenario);
-    setOnlineUserId(null);
-    testRequestStartedRef.current = false;
-    normalBotRequestStageRef.current = "done";
-    normalBotBuyInTriggerRef.current = null;
-    setRoom(nextRoom);
-    setRoomCode(roomCode);
-    setChipRequests([]);
-    setIncomingChipRequest(null);
-    setSessionEnded(false);
-    setTable(
-      createTableFromPlayers({
-        roomCode,
-        userId: localPlayerId,
-        players: nextRoom.players,
-        seed: botIsHost ? 901 : 902,
-      }),
-    );
-    setScreen("table");
-  }
-
   function startHand() {
     if (!room || room.players.length < AFLATOON_RULES.minPlayers) {
       showOverlay("Waiting for one more player", "warn");
