@@ -2402,7 +2402,7 @@ function OvalTable({
     <section className="relative mx-auto mb-2 h-[350px] w-full max-w-4xl sm:mb-4 sm:h-[470px]" ref={tableRef}>
       <div className="absolute inset-x-0 top-12 bottom-12 rounded-[50%] border-[10px] border-[#5c3b20] bg-[radial-gradient(ellipse_at_center,#2f8b58_0%,#1d6740_48%,#11402a_100%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08),inset_0_28px_70px_rgba(255,255,255,0.07),0_28px_70px_rgba(0,0,0,0.42)] sm:inset-x-3 sm:top-6 sm:bottom-6" />
       <div className="absolute inset-x-6 top-[100px] bottom-[100px] rounded-[50%] border border-[#d2a84b]/25 bg-black/10 sm:inset-x-14 sm:top-24 sm:bottom-24" />
-      <div className="absolute left-1/2 top-[46%] w-[196px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/28 p-2 text-center shadow-xl shadow-black/25 backdrop-blur sm:top-[48%] sm:w-[288px] sm:p-3">
+      <div className="absolute left-1/2 top-[54%] w-[164px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/28 p-1.5 text-center shadow-xl shadow-black/25 backdrop-blur sm:top-[48%] sm:w-[288px] sm:p-3">
         <CenterDeck
           actionCount={table.actionCount}
           card={getActiveCenter(table)}
@@ -2461,9 +2461,9 @@ function CenterDeck({
   count: number;
 }) {
   return (
-    <div className="center-deck-content">
-        <div className="mt-3 flex items-center justify-center gap-4">
-        <div className="deck-stack relative h-28 w-20">
+    <div className="center-deck-content origin-center scale-[0.7] sm:scale-100">
+        <div className="mt-2 flex items-center justify-center gap-3 sm:mt-3 sm:gap-4">
+        <div className="deck-stack relative h-28 w-20 origin-left scale-[0.84] sm:scale-100">
           <div className="deck-real-card deck-real-card-one">
             <PlayingCard card={card} size="large" />
           </div>
@@ -2481,12 +2481,12 @@ function CenterDeck({
             <PlayingCard card={card} flipped size="large" />
           </div>
         </div>
-        <div className="text-left">
+        <div className="ml-1 translate-x-6 text-left sm:ml-0 sm:translate-x-0">
           <p className="text-xs uppercase text-white/50">Jokers</p>
-          <div className="mt-2 flex gap-1">
+          <div className="mt-1 flex gap-1 sm:mt-2">
             {center.jokerRanks.map((rank) => (
               <span
-                className="grid h-10 w-10 place-items-center rounded-md bg-[#f7f3e8] text-base font-black text-[#161812]"
+                className="grid h-8 w-8 place-items-center rounded-md bg-[#f7f3e8] text-sm font-black text-[#161812] sm:h-10 sm:w-10 sm:text-base"
                 key={rank}
               >
                 {rank}
@@ -3176,7 +3176,7 @@ function PlayingCard({
         : size === "seat"
           ? "h-[60px] w-[43px] sm:h-[70px] sm:w-[50px]"
           : size === "tiny"
-            ? "h-[52px] w-[37px]"
+            ? "h-[40px] w-[28px] sm:h-[52px] sm:w-[37px]"
             : "h-[88px] w-[63px]";
   const cardDeck = PlayingCards as Record<string, CardSvgComponent>;
   const CardAsset = cardDeck[cardAssetName(card)];
@@ -3636,7 +3636,7 @@ function seatPositionClass(index: number, playerCount: number) {
   const seatMap: Record<number, string[]> = {
     2: [
       "left-1/2 bottom-0 -translate-x-1/2",
-      "left-1/2 top-0 -translate-x-1/2",
+      "left-1/2 -top-2 -translate-x-1/2",
     ],
     3: [
       "left-1/2 bottom-0 -translate-x-1/2",
@@ -3646,21 +3646,21 @@ function seatPositionClass(index: number, playerCount: number) {
     4: [
       "left-1/2 bottom-0 -translate-x-1/2",
       "right-4 top-1/2 -translate-y-1/2 sm:right-10",
-      "left-1/2 top-0 -translate-x-1/2",
+      "left-1/2 -top-2 -translate-x-1/2",
       "left-4 top-1/2 -translate-y-1/2 sm:left-10",
     ],
     5: [
       "left-1/2 bottom-0 -translate-x-1/2",
       "right-2 bottom-[26%] sm:right-8",
-      "right-[26%] top-0 translate-x-1/2",
-      "left-[26%] top-0 -translate-x-1/2",
+      "right-[26%] -top-2 translate-x-1/2",
+      "left-[26%] -top-2 -translate-x-1/2",
       "left-2 bottom-[26%] sm:left-8",
     ],
     6: [
       "left-1/2 bottom-0 -translate-x-1/2",
       "right-2 bottom-[24%] sm:right-8",
       "right-4 top-[22%] sm:right-12",
-      "left-1/2 top-0 -translate-x-1/2",
+      "left-1/2 -top-2 -translate-x-1/2",
       "left-4 top-[22%] sm:left-12",
       "left-2 bottom-[24%] sm:left-8",
     ],
@@ -3668,8 +3668,8 @@ function seatPositionClass(index: number, playerCount: number) {
       "left-1/2 bottom-0 -translate-x-1/2",
       "right-2 bottom-[22%] sm:right-6",
       "right-4 top-[25%] sm:right-12",
-      "right-[35%] top-0 translate-x-1/2",
-      "left-[35%] top-0 -translate-x-1/2",
+      "right-[35%] -top-2 translate-x-1/2",
+      "left-[35%] -top-2 -translate-x-1/2",
       "left-4 top-[25%] sm:left-12",
       "left-2 bottom-[22%] sm:left-6",
     ],
