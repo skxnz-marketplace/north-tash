@@ -345,6 +345,11 @@ export async function loadPrivateReveals(code: string, userId: string) {
 export function stripPrivateHands(snapshot: MultiplayerSnapshot): MultiplayerSnapshot {
   const table = snapshot.table as {
     players?: Array<Record<string, unknown>>;
+    poker?: {
+      deck?: unknown[];
+      burnCards?: unknown[];
+      players?: Array<Record<string, unknown>>;
+    };
     userId?: string;
     pendingShow?: Record<string, unknown>;
     privateReveal?: Record<string, unknown>;
@@ -360,6 +365,17 @@ export function stripPrivateHands(snapshot: MultiplayerSnapshot): MultiplayerSna
       ...table,
       userId: "",
       players: (table.players ?? []).map((player) => ({ ...player, hand: [] })),
+      poker: table.poker
+        ? {
+            ...table.poker,
+            deck: [],
+            burnCards: [],
+            players: (table.poker.players ?? []).map((player) => ({
+              ...player,
+              holeCards: [],
+            })),
+          }
+        : undefined,
       privateReveal: undefined,
     },
   };

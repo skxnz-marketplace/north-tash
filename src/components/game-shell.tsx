@@ -51,6 +51,14 @@ import {
   rupeesForChips,
 } from "@/lib/aflatoon";
 import type { Card, GameMode } from "@/lib/aflatoon";
+import type { TableGameMode } from "@/lib/game-rules";
+import {
+  describeHoldemHand,
+  texasHoldemRulesEngine,
+  TEXAS_HOLDEM_RULES,
+  type PokerAction,
+  type TexasHoldemState,
+} from "@/lib/poker";
 import {
   buyInChips,
   calculatePlayerSettlements,
@@ -140,6 +148,8 @@ type ChipMotion = {
   key: number;
 };
 
+type GameModeChoice = Exclude<TableGameMode, "AFLATOON"> | "AFLATOON";
+
 type CardSvgComponent = (props: SVGProps<SVGSVGElement>) => ReactNode;
 
 const ROOM_PREFIX = "north-tash-room-";
@@ -156,6 +166,7 @@ export function normalizeSharedTable(value: unknown): TableState | null {
   }
 
   const candidate = value as Partial<TableState>;
+  const isPoker = candidate.gameMode === "TEXAS_HOLDEM";
   const validPhase =
     candidate.phase === "collecting-boots" ||
     candidate.phase === "playing" ||
@@ -165,9 +176,9 @@ export function normalizeSharedTable(value: unknown): TableState | null {
     !validPhase ||
     typeof candidate.roomCode !== "string" ||
     !Array.isArray(candidate.players) ||
-    candidate.players.length < AFLATOON_RULES.minPlayers ||
+    candidate.players.length < (isPoker ? TEXAS_HOLDEM_RULES.minPlayers : AFLATOON_RULES.minPlayers) ||
     !Array.isArray(candidate.centerHistory) ||
-    (candidate.phase !== "collecting-boots" && candidate.centerHistory.length === 0) ||
+    (!isPoker && candidate.phase !== "collecting-boots" && candidate.centerHistory.length === 0) ||
     !Number.isInteger(candidate.turnIndex) ||
     !Number.isInteger(candidate.dealerIndex)
   ) {
@@ -176,6 +187,7 @@ export function normalizeSharedTable(value: unknown): TableState | null {
 
   return {
     ...(candidate as TableState),
+    gameMode: candidate.gameMode ?? "AFLATOON",
     userId: "",
     revision:
       typeof candidate.revision === "number" && Number.isFinite(candidate.revision)
@@ -200,6 +212,98 @@ export function normalizeSharedTable(value: unknown): TableState | null {
     pendingBootPlayerIds: Array.isArray(candidate.pendingBootPlayerIds)
       ? candidate.pendingBootPlayerIds
       : [],
+    poker: candidate.poker,
+  };
+}
+
+function createPokerTableFromRoom(input: {
+  roomCode: string;
+  userId: string;
+  players: LobbyPlayer[];
+  dealerIndex?: number;
+  seed?: number;
+}): TableState {
+  const activePlayers = input.players.slice(0, TEXAS_HOLDEM_RULES.maxPlayers);
+  const poker = texasHoldemRulesEngine.createInitialState({
+    roomCode: input.roomCode,
+    dealerIndex: input.dealerIndex ?? 0,
+    seed: input.seed,
+    players: activePlayers.map((player) => ({
+      id: player.id,
+      name: player.name,
+      chips: player.chips,
+    })),
+  });
+
+  return {
+    gameMode: "TEXAS_HOLDEM",
+    roomCode: input.roomCode,
+    userId: input.userId,
+    phase: poker.street === "COMPLETE" ? "hand-complete" : "playing",
+    handNumber: 1,
+    dealerIndex: poker.players.findIndex((player) => player.playerId === poker.dealerPlayerId),
+    turnIndex: Math.max(
+      0,
+      poker.players.findIndex((player) => player.playerId === poker.currentActorPlayerId),
+    ),
+    pot: poker.players.reduce((total, player) => total + player.totalHandContribution, 0),
+    carryOverPot: 0,
+    deck: [],
+    centerHistory: [],
+    players: poker.players.map((player) => ({
+      id: player.playerId,
+      name: player.name,
+      seat: player.seatIndex === 0 ? "South" : `Seat ${player.seatIndex + 1}`,
+      chips: player.stack,
+      totalBuyInChips: input.players.find((candidate) => candidate.id === player.playerId)?.chips ?? player.stack,
+      transferBalanceChips: 0,
+      shortChips: 0,
+      declinesUsed: 0,
+      status: player.status === "FOLDED" ? "folded" : player.status === "SITTING_OUT" ? "standing" : "active",
+      isBot: Boolean(input.players.find((candidate) => candidate.id === player.playerId)?.isBot),
+      hand: [],
+    })),
+    revealedPlayerIds: [],
+    actionCount: 0,
+    log: [{ id: `${Date.now()}-poker`, text: "Texas Hold'em hand started.", tone: "good" }],
+    revision: 1,
+    poker,
+  };
+}
+
+function tableFromPokerState(current: TableState, poker: TexasHoldemState): TableState {
+  return {
+    ...current,
+    gameMode: "TEXAS_HOLDEM",
+    phase: poker.street === "COMPLETE" ? "hand-complete" : "playing",
+    dealerIndex: Math.max(
+      0,
+      poker.players.findIndex((player) => player.playerId === poker.dealerPlayerId),
+    ),
+    turnIndex: Math.max(
+      0,
+      poker.players.findIndex((player) => player.playerId === poker.currentActorPlayerId),
+    ),
+    pot: poker.players.reduce((total, player) => total + player.totalHandContribution, 0),
+    players: current.players.map((player) => {
+      const pokerPlayer = poker.players.find((candidate) => candidate.playerId === player.id);
+
+      return pokerPlayer
+        ? {
+            ...player,
+            chips: pokerPlayer.stack,
+            status:
+              pokerPlayer.status === "FOLDED"
+                ? "folded"
+                : pokerPlayer.status === "SITTING_OUT"
+                  ? "standing"
+                  : "active",
+          }
+        : player;
+    }),
+    actionCount: current.actionCount + 1,
+    log: poker.events.map((text) => ({ id: `${Date.now()}-${text}`, text, tone: "neutral" as const })).slice(0, 10),
+    poker,
   };
 }
 
@@ -224,6 +328,7 @@ export function GameShell() {
   const [transferDraft, setTransferDraft] = useState<TransferDraft | null>(null);
   const [pendingFold, setPendingFold] = useState(false);
   const [chipMotion, setChipMotion] = useState<ChipMotion | null>(null);
+  const [modePickerOpen, setModePickerOpen] = useState(false);
   const [testRoomScenario, setTestRoomScenario] = useState<TestRoomScenario>(null);
   const [incomingChipRequest, setIncomingChipRequest] = useState<IncomingChipRequest | null>(null);
   const [shortfallPrompt, setShortfallPrompt] = useState<ShortfallPrompt | null>(null);
@@ -476,7 +581,30 @@ export function GameShell() {
         let next = current;
         const requestId = String(action.payload.requestId ?? action.id);
 
-        if (action.actionType === "pay_boot") {
+        if (action.actionType === "poker_action") {
+          if (current.gameMode !== "TEXAS_HOLDEM" || !current.poker) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "not_poker" }).catch(() => undefined);
+            continue;
+          }
+          try {
+            const pokerAction = action.payload.action as PokerAction | undefined;
+            if (!pokerAction) {
+              throw new Error("Missing Poker action.");
+            }
+            const transition = texasHoldemRulesEngine.applyAction(
+              current.poker,
+              actorId,
+              pokerAction,
+            );
+            next = tableFromPokerState(current, transition.state);
+          } catch (error) {
+            await markGameActionProcessed(action.id, {
+              ok: false,
+              reason: error instanceof Error ? error.message : "invalid_poker_action",
+            }).catch(() => undefined);
+            continue;
+          }
+        } else if (action.actionType === "pay_boot") {
           next = payBoot(current, actorId, Date.now() + 3300);
         } else if (action.actionType === "chaal") {
           next = playChaal(current, actorId);
@@ -665,7 +793,7 @@ export function GameShell() {
             );
             const canKeepPrivateHand =
               currentTable?.handNumber === sharedTable.handNumber &&
-              currentPlayer?.hand.length === 3 &&
+              currentPlayer?.hand.length === (sharedTable.gameMode === "TEXAS_HOLDEM" ? 2 : 3) &&
               (player.id === currentPlayerId ||
                 Boolean(currentTable.privateReveal?.playerIds.includes(player.id)));
 
@@ -689,7 +817,9 @@ export function GameShell() {
               loadPrivateReveals(room.code, onlineUserId ?? ""),
             ]);
 
-            if (protectedState[0].length === 3) {
+            const expectedCards = sharedTable.gameMode === "TEXAS_HOLDEM" ? 2 : 3;
+
+            if (protectedState[0].length === expectedCards) {
               break;
             }
 
@@ -707,8 +837,21 @@ export function GameShell() {
               }
 
               const revealMap = new Map(reveals.map((reveal) => [reveal.playerId, reveal.hand]));
+              const nextPoker = currentTable.poker
+                ? {
+                    ...currentTable.poker,
+                    players: currentTable.poker.players.map((player) => ({
+                      ...player,
+                      holeCards:
+                        player.playerId === currentPlayerId
+                          ? (hand as typeof player.holeCards)
+                          : (revealMap.get(player.playerId) as typeof player.holeCards | undefined) ?? [],
+                    })),
+                  }
+                : undefined;
               return {
                 ...currentTable,
+                poker: nextPoker,
                 privateReveal: reveals[0]
                   ? {
                       requestId: reveals[0].requestId,
@@ -807,6 +950,13 @@ export function GameShell() {
 
     canonicalRevisionRef.current = Math.max(table.revision, canonicalRevisionRef.current);
     const canonicalTable = table;
+    const privateHandRows =
+      canonicalTable.gameMode === "TEXAS_HOLDEM" && canonicalTable.poker
+        ? canonicalTable.poker.players.map((player) => ({
+            id: player.playerId,
+            hand: player.holeCards,
+          }))
+        : canonicalTable.players;
     const timeout = window.setTimeout(() => {
       void Promise.all([
         saveMultiplayerSnapshot(
@@ -816,7 +966,7 @@ export function GameShell() {
             table: canonicalTable as unknown as Record<string, unknown>,
           }),
         ),
-        savePrivateHands(room.code, canonicalTable.players),
+        savePrivateHands(room.code, privateHandRows),
       ]).catch(() => showOverlay("Online sync paused", "warn"));
     }, 180);
 
@@ -1237,16 +1387,51 @@ export function GameShell() {
       return;
     }
 
+    setModePickerOpen(true);
+  }
+
+  function startSelectedGame(mode: GameModeChoice) {
+    if (!room) {
+      return;
+    }
+
+    if ((mode === "CLASSIC_FLIPPING" || mode === "FLIPPING_MOFLESS") && room.players.length < 3) {
+      showOverlay("Flipping requires at least 3 players", "warn");
+      return;
+    }
+
     normalBotRequestStageRef.current = "idle";
     normalBotBuyInTriggerRef.current = null;
     setIncomingChipRequest(null);
     setChipRequests([]);
+    setModePickerOpen(false);
+
+    if (mode === "TEXAS_HOLDEM") {
+      const nextTable = createPokerTableFromRoom({
+        roomCode: room.code,
+        userId: currentPlayerId,
+        players: room.players,
+        dealerIndex: Math.floor(Math.random() * room.players.length),
+        seed: Date.now(),
+      });
+      canonicalRevisionRef.current = nextTable.revision;
+      setTable(nextTable);
+      setScreen("table");
+      return;
+    }
+
+    if (mode === "CLASSIC_FLIPPING" || mode === "FLIPPING_MOFLESS") {
+      showOverlay("Flipping modes are staged next; Aflatoon remains live.", "warn");
+      return;
+    }
+
     const nextTable = createTableFromPlayers({
         roomCode: room.code,
         userId: currentPlayerId,
         players: room.players,
         startAt: Date.now() + 3300,
       });
+    nextTable.gameMode = "AFLATOON";
     nextTable.revision = 1;
     canonicalRevisionRef.current = nextTable.revision;
     setTable(nextTable);
@@ -1268,6 +1453,33 @@ export function GameShell() {
       currentTable ? payBoot(currentTable, currentTable.userId, Date.now() + 3300) : currentTable,
     );
     window.setTimeout(() => setActionPending(false), 250);
+  }
+
+  function playPokerAction(action: PokerAction) {
+    if (!table?.poker || actionPending) {
+      return;
+    }
+
+    if (dispatchGameAction("poker_action", { action })) {
+      showOverlay("Poker action sent", "neutral");
+      return;
+    }
+
+    setActionPending(true);
+    try {
+      const transition = texasHoldemRulesEngine.applyAction(
+        table.poker,
+        table.userId,
+        action,
+      );
+      setTable((currentTable) =>
+        currentTable ? tableFromPokerState(currentTable, transition.state) : currentTable,
+      );
+    } catch (error) {
+      showOverlay(error instanceof Error ? error.message : "Poker action failed", "warn");
+    } finally {
+      window.setTimeout(() => setActionPending(false), 250);
+    }
   }
 
   function requestChips(chips: 10 | 20) {
@@ -1933,6 +2145,12 @@ export function GameShell() {
           sessionEnded={sessionEnded}
           onLeave={leaveTable}
         />
+        <GameModePicker
+          onClose={() => setModePickerOpen(false)}
+          onSelect={startSelectedGame}
+          open={modePickerOpen}
+          playerCount={room?.players.length ?? 0}
+        />
       </main>
     );
   }
@@ -1957,6 +2175,109 @@ export function GameShell() {
   const userCanAct = canUserAct(table);
   const showLabel = activePlayers.length === 2 ? "Show" : "Back Show";
   const isHost = room?.hostId === currentPlayerId;
+
+  if (table.gameMode === "TEXAS_HOLDEM" && table.poker) {
+    const pokerPlayer = table.poker.players.find((player) => player.playerId === table.userId);
+    const pokerCanAct =
+      table.poker.currentActorPlayerId === table.userId && pokerPlayer?.status === "ACTIVE";
+
+    return (
+      <main className="app-shell text-[#f7f3e8]">
+        <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
+          <header className="app-header sticky top-0 z-30 flex items-center justify-between border-b border-white/10 px-4 py-3 sm:px-6">
+            <div>
+              <p className="text-xs font-semibold uppercase text-[#d2a84b]">North Tash</p>
+              <h1 className="text-xl font-black text-white">Texas Hold&apos;em</h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="subtle-panel px-3 py-2 text-right">
+                <p className="text-xs text-white/50">Room</p>
+                <p className="font-mono text-base font-bold">{table.roomCode}</p>
+              </div>
+              <button
+                aria-label="Open table menu"
+                className="icon-action grid h-11 w-11 place-items-center text-white"
+                type="button"
+                onClick={() => setMenuOpen(true)}
+              >
+                <Menu size={21} />
+              </button>
+            </div>
+          </header>
+
+          <div className="grid flex-1 gap-2 px-2 py-2 sm:gap-4 sm:px-3 sm:py-4 lg:grid-cols-[1fr_310px] lg:px-5">
+            <section className="game-surface flex min-h-0 flex-col overflow-hidden bg-[#123823] lg:min-h-[720px]">
+              <div className="grid grid-cols-3 items-center gap-2 border-b border-white/10 bg-black/25 px-3 py-3">
+                <PotMetric chips={table.pot} />
+                <Metric
+                  label="Street"
+                  value={formatPokerStreet(table.poker.street)}
+                  sub={pokerCanAct ? "Your move" : "Wait"}
+                />
+                <Metric
+                  label="To call"
+                  value={`${Math.max(0, table.poker.currentHighestStreetContribution - (pokerPlayer?.currentStreetContribution ?? 0))}`}
+                  sub={`BB ${TEXAS_HOLDEM_RULES.bigBlind}`}
+                />
+              </div>
+
+              <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
+                <PokerTableView
+                  localPlayerId={table.userId}
+                  poker={table.poker}
+                  turnRemainingMs={turnRemainingMs}
+                />
+                {overlay ? <ActionOverlay overlay={overlay} /> : null}
+                {pokerPlayer ? (
+                  <PokerActionPanel
+                    actionPending={actionPending}
+                    onAction={playPokerAction}
+                    player={pokerPlayer}
+                    poker={table.poker}
+                  />
+                ) : null}
+              </div>
+            </section>
+
+            <aside className="surface-panel hidden min-h-[720px] flex-col p-3 lg:flex">
+              <PokerSidebar poker={table.poker} />
+            </aside>
+          </div>
+        </section>
+
+        <TableMenu
+          open={menuOpen}
+          isHost={isHost}
+          table={table}
+          chipRequests={displayedChipRequests}
+          currentPlayerId={table.userId}
+          onApproveChipRequest={approveChipRequest}
+          onRejectChipRequest={rejectChipRequest}
+          onRequestChips={requestChips}
+          onRequestTransfer={openTransferRequest}
+          onClose={() => setMenuOpen(false)}
+          onEndSession={endSession}
+          sessionEnded={sessionEnded}
+          onLeave={leaveTable}
+        />
+        <SessionTallyModal
+          open={sessionTallyOpen}
+          players={table.players}
+          potChips={table.pot}
+          transferLedger={table.transferLedger}
+          onClose={() => setSessionTallyOpen(false)}
+        />
+        <TransferRequestModal
+          draft={transferDraft}
+          players={table.players}
+          requesterId={table.userId}
+          onCancel={() => setTransferDraft(null)}
+          onChange={setTransferDraft}
+          onSubmit={submitTransferRequest}
+        />
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell text-[#f7f3e8]">
@@ -2226,6 +2547,86 @@ function TestModePanel({
         </button>
       </div>
     </section>
+  );
+}
+
+function GameModePicker({
+  onClose,
+  onSelect,
+  open,
+  playerCount,
+}: {
+  onClose: () => void;
+  onSelect: (mode: GameModeChoice) => void;
+  open: boolean;
+  playerCount: number;
+}) {
+  if (!open) {
+    return null;
+  }
+
+  const flippingLocked = playerCount < 3;
+
+  return (
+    <div className="modal-backdrop fixed inset-0 z-[60] grid place-items-center px-4">
+      <section className="modal-surface w-full max-w-md p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#e2b653]">Choose game</p>
+            <h2 className="mt-1 text-2xl font-black text-white">Deal a hand</h2>
+          </div>
+          <button
+            aria-label="Close game chooser"
+            className="icon-action grid h-10 w-10 place-items-center"
+            type="button"
+            onClick={onClose}
+          >
+            <X size={19} />
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          <button
+            className="primary-action flex min-h-16 flex-col items-start justify-center px-4 text-left"
+            type="button"
+            onClick={() => onSelect("AFLATOON")}
+          >
+            <span className="text-base font-black">Aflatoon</span>
+            <span className="text-xs font-semibold text-black/60">Current North Tash mode</span>
+          </button>
+          <button
+            className="secondary-action flex min-h-16 flex-col items-start justify-center px-4 text-left"
+            type="button"
+            onClick={() => onSelect("TEXAS_HOLDEM")}
+          >
+            <span className="text-base font-black text-white">Texas Hold&apos;em</span>
+            <span className="text-xs font-semibold text-white/55">Small blind 1, big blind 2, no-limit betting</span>
+          </button>
+          <button
+            className="secondary-action flex min-h-16 flex-col items-start justify-center px-4 text-left disabled:opacity-45"
+            disabled={flippingLocked}
+            type="button"
+            onClick={() => onSelect("CLASSIC_FLIPPING")}
+          >
+            <span className="text-base font-black text-white">Classic Flipping</span>
+            <span className="text-xs font-semibold text-white/55">
+              {flippingLocked ? "Requires at least 3 players" : "Three-card flipping rules"}
+            </span>
+          </button>
+          <button
+            className="secondary-action flex min-h-16 flex-col items-start justify-center px-4 text-left disabled:opacity-45"
+            disabled={flippingLocked}
+            type="button"
+            onClick={() => onSelect("FLIPPING_MOFLESS")}
+          >
+            <span className="text-base font-black text-white">Flipping Mofless</span>
+            <span className="text-xs font-semibold text-white/55">
+              {flippingLocked ? "Requires at least 3 players" : "Low-hand flipping rules"}
+            </span>
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -2557,6 +2958,218 @@ function OvalTable({
       ))}
     </section>
   );
+}
+
+function PokerTableView({
+  localPlayerId,
+  poker,
+  turnRemainingMs,
+}: {
+  localPlayerId: string;
+  poker: TexasHoldemState;
+  turnRemainingMs: number;
+}) {
+  return (
+    <section className="relative mx-auto mb-2 h-[390px] w-full max-w-4xl sm:mb-4 sm:h-[500px]">
+      <div className="absolute inset-x-0 top-10 bottom-10 rounded-[50%] border-[10px] border-[#5c3b20] bg-[radial-gradient(ellipse_at_center,#2f8b58_0%,#1d6740_48%,#11402a_100%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08),inset_0_28px_70px_rgba(255,255,255,0.07),0_28px_70px_rgba(0,0,0,0.42)] sm:inset-x-3 sm:top-6 sm:bottom-6" />
+      <div className="absolute left-1/2 top-[47%] z-10 w-[300px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/24 p-3 text-center shadow-xl shadow-black/25 backdrop-blur sm:w-[460px]">
+        <p className="text-xs font-bold uppercase text-[#f5d77d]">{formatPokerStreet(poker.street)}</p>
+        <div className="mt-3 flex min-h-[84px] items-center justify-center gap-1.5 sm:gap-2">
+          {Array.from({ length: 5 }).map((_, index) => {
+            const card = poker.communityCards[index];
+
+            return card ? (
+              <PlayingCard card={card} flipped key={`${card.rank}-${card.suit}-${index}`} size="medium" />
+            ) : (
+              <CardBack key={index} size="medium" faded />
+            );
+          })}
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <div className="rounded-md bg-black/28 px-2 py-2">
+            <span className="block text-white/45">Total pot</span>
+            <strong className="text-white">{poker.players.reduce((sum, player) => sum + player.totalHandContribution, 0)} chips</strong>
+          </div>
+          <div className="rounded-md bg-black/28 px-2 py-2">
+            <span className="block text-white/45">Current bet</span>
+            <strong className="text-white">{poker.currentHighestStreetContribution} chips</strong>
+          </div>
+        </div>
+      </div>
+
+      {poker.players.map((player, index) => {
+        const isUser = player.playerId === localPlayerId;
+        const summary = isUser ? describeHoldemHand(player.holeCards, poker.communityCards) : null;
+
+        return (
+          <div
+            className={`absolute z-20 w-[118px] rounded-md border border-white/12 bg-black/40 p-2 shadow-lg backdrop-blur sm:w-[150px] ${seatPositionClass(index, poker.players.length)}`}
+            key={player.playerId}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <p className="truncate text-xs font-black text-white">{player.name}</p>
+              <div className="flex gap-1">
+                {poker.dealerPlayerId === player.playerId ? <PokerRoleBadge label="D" /> : null}
+                {poker.smallBlindPlayerId === player.playerId ? <PokerRoleBadge label="SB" /> : null}
+                {poker.bigBlindPlayerId === player.playerId ? <PokerRoleBadge label="BB" /> : null}
+              </div>
+            </div>
+            <div className="mt-1 flex items-center justify-between text-[10px] font-semibold text-white/60">
+              <span>{player.stack} chips</span>
+              <span>{player.status.replace("_", " ")}</span>
+            </div>
+            {poker.currentActorPlayerId === player.playerId && player.status === "ACTIVE" ? (
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full bg-[#f5d77d]"
+                  style={{
+                    width: `${Math.max(4, Math.min(100, (turnRemainingMs / (AFLATOON_RULES.turnTimerSeconds * 1000)) * 100))}%`,
+                  }}
+                />
+              </div>
+            ) : null}
+            <div className="mt-2 flex justify-center gap-1">
+              {isUser && player.holeCards.length
+                ? player.holeCards.map((card) => (
+                    <PlayingCard card={card} flipped key={`${player.playerId}-${card.rank}-${card.suit}`} size="small" />
+                  ))
+                : [0, 1].map((slot) => <CardBack key={slot} size="small" faded={player.status === "FOLDED"} />)}
+            </div>
+            {player.currentStreetContribution > 0 ? (
+              <p className="mt-1 text-center text-[10px] font-bold text-[#f5d77d]">
+                In: {player.currentStreetContribution}
+              </p>
+            ) : null}
+            {isUser && summary ? (
+              <p className="mt-1 truncate text-center text-[10px] font-semibold text-white/65">{summary.label}</p>
+            ) : null}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function PokerActionPanel({
+  actionPending,
+  onAction,
+  player,
+  poker,
+}: {
+  actionPending: boolean;
+  onAction: (action: PokerAction) => void;
+  player: TexasHoldemState["players"][number];
+  poker: TexasHoldemState;
+}) {
+  const legalActions = texasHoldemRulesEngine.getLegalActions(poker, player.playerId);
+  const callAmount = Math.max(0, poker.currentHighestStreetContribution - player.currentStreetContribution);
+  const canAct = legalActions.canAct && !actionPending;
+  const raise = legalActions.actions.find((action) => action.type === "RAISE_TO");
+  const bet = legalActions.actions.find((action) => action.type === "BET");
+  const [raiseTo, setRaiseTo] = useState(raise?.minimumRaiseTo ?? bet?.minimumAmount ?? TEXAS_HOLDEM_RULES.bigBlind);
+  const minimumBetOrRaise = raise?.minimumRaiseTo ?? bet?.minimumAmount ?? 1;
+  const maximumBetOrRaise = raise?.maximumRaiseTo ?? bet?.maximumAmount ?? player.stack;
+  const selectedBetOrRaise = Math.min(maximumBetOrRaise, Math.max(minimumBetOrRaise, raiseTo));
+
+  const bestHand = describeHoldemHand(player.holeCards, poker.communityCards);
+
+  return (
+    <div className="surface-panel-soft p-3 shadow-xl shadow-black/25">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs uppercase text-white/50">Your Poker hand</p>
+          <p className="truncate text-sm font-semibold text-white">
+            {bestHand ? `${bestHand.label} by ${bestHand.bestCards.map(formatCard).join(" ")}` : "Best hand updates after the flop"}
+          </p>
+        </div>
+        <ChipPill chips={player.stack} />
+      </div>
+      <div className="mt-3 grid grid-cols-4 gap-2">
+        <button className="danger-action h-11 text-sm font-semibold disabled:opacity-45" disabled={!canAct} type="button" onClick={() => onAction({ type: "FOLD" })}>
+          Fold
+        </button>
+        {callAmount === 0 ? (
+          <button className="secondary-action h-11 text-sm font-semibold disabled:opacity-45" disabled={!canAct} type="button" onClick={() => onAction({ type: "CHECK" })}>
+            Check
+          </button>
+        ) : (
+          <button className="secondary-action h-11 text-sm font-semibold disabled:opacity-45" disabled={!canAct} type="button" onClick={() => onAction({ type: "CALL" })}>
+            Call {Math.min(callAmount, player.stack)}
+          </button>
+        )}
+        <button className="secondary-action h-11 text-sm font-semibold disabled:opacity-45" disabled={!canAct || player.stack <= 0} type="button" onClick={() => onAction({ type: "ALL_IN" })}>
+          All In
+        </button>
+        <button
+          className="primary-action h-11 text-sm font-black disabled:opacity-45"
+          disabled={!canAct || (!raise && !bet)}
+          type="button"
+          onClick={() => onAction(raise ? { type: "RAISE_TO", amount: selectedBetOrRaise } : { type: "BET", amount: selectedBetOrRaise })}
+        >
+          {raise ? `Raise ${selectedBetOrRaise}` : `Bet ${selectedBetOrRaise}`}
+        </button>
+      </div>
+      {raise || bet ? (
+        <div className="mt-3 grid grid-cols-[44px_1fr_44px] gap-2">
+          <button className="secondary-action grid h-10 place-items-center" type="button" onClick={() => setRaiseTo((value) => Math.max(minimumBetOrRaise, value - 1))}>
+            <Minus size={16} />
+          </button>
+          <input
+            aria-label="Poker bet amount"
+            className="control-field h-10 text-center font-black text-white"
+            max={maximumBetOrRaise}
+            min={minimumBetOrRaise}
+            type="number"
+            value={raiseTo}
+            onChange={(event) => setRaiseTo(Number(event.target.value) || 1)}
+          />
+          <button className="secondary-action grid h-10 place-items-center" type="button" onClick={() => setRaiseTo((value) => Math.min(maximumBetOrRaise, value + 1))}>
+            <Plus size={16} />
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PokerSidebar({ poker }: { poker: TexasHoldemState }) {
+  return (
+    <div className="flex h-full flex-col">
+      <h2 className="text-sm font-bold uppercase text-white/55">Poker Table</h2>
+      <div className="mt-3 grid gap-2">
+        {poker.pots.map((pot) => (
+          <div className="rounded-md border border-white/10 bg-black/20 p-3" key={pot.id}>
+            <p className="text-xs font-bold uppercase text-[#f5d77d]">{pot.type === "MAIN" ? "Main pot" : "Side pot"}</p>
+            <p className="text-lg font-black text-white">{pot.amount} chips</p>
+            <p className="mt-1 text-xs text-white/45">Eligible: {pot.eligiblePlayerIds.length}</p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 space-y-2">
+        {poker.events.map((event) => (
+          <p className="rounded-md bg-white/6 px-3 py-2 text-sm text-white/70" key={event}>
+            {event}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PokerRoleBadge({ label }: { label: string }) {
+  return (
+    <span className="rounded bg-[#f5d77d] px-1.5 py-0.5 text-[9px] font-black text-[#151611]">
+      {label}
+    </span>
+  );
+}
+
+function formatPokerStreet(street: TexasHoldemState["street"]) {
+  return street
+    .toLowerCase()
+    .split("_")
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function BootCollectionPanel({
@@ -3253,7 +3866,11 @@ function TableMenu({
 
         {table ? (
           <div className="mt-5 flex-1 overflow-auto border-t border-white/10 pt-4 lg:hidden">
-            <TableSidebar currentPlayerId={getCurrentPlayer(table)?.id} table={table} />
+            {table.gameMode === "TEXAS_HOLDEM" && table.poker ? (
+              <PokerSidebar poker={table.poker} />
+            ) : (
+              <TableSidebar currentPlayerId={getCurrentPlayer(table)?.id} table={table} />
+            )}
           </div>
         ) : null}
       </aside>
@@ -3334,15 +3951,19 @@ function PlayingCard({
   flipped?: boolean;
   gsapDeal?: boolean;
   showdown?: boolean;
-  size?: "tiny" | "seat" | "normal" | "large" | "showdown";
+  size?: "tiny" | "small" | "seat" | "normal" | "medium" | "large" | "showdown";
 }) {
   const dimensions =
     size === "showdown"
       ? "h-[112px] w-[80px]"
+      : size === "medium"
+        ? "h-[88px] w-[63px]"
       : size === "large"
         ? "h-[98px] w-[70px]"
         : size === "seat"
           ? "h-[60px] w-[43px] sm:h-[70px] sm:w-[50px]"
+          : size === "small"
+            ? "h-[54px] w-[38px] sm:h-[64px] sm:w-[46px]"
           : size === "tiny"
             ? "h-[40px] w-[28px] sm:h-[52px] sm:w-[37px]"
             : "h-[88px] w-[63px]";
@@ -3369,6 +3990,34 @@ function PlayingCard({
           <CardAsset height="100%" width="100%" />
         </div>
       </div>
+    </div>
+  );
+}
+
+function CardBack({
+  faded = false,
+  size = "normal",
+}: {
+  faded?: boolean;
+  size?: "tiny" | "small" | "seat" | "normal" | "medium" | "large";
+}) {
+  const dimensions =
+    size === "large"
+      ? "h-[98px] w-[70px]"
+      : size === "medium"
+        ? "h-[88px] w-[63px]"
+        : size === "seat"
+          ? "h-[60px] w-[43px] sm:h-[70px] sm:w-[50px]"
+          : size === "small"
+            ? "h-[54px] w-[38px] sm:h-[64px] sm:w-[46px]"
+            : size === "tiny"
+              ? "h-[40px] w-[28px] sm:h-[52px] sm:w-[37px]"
+              : "h-[88px] w-[63px]";
+  const BackAsset = (PlayingCards as Record<string, CardSvgComponent>).B1;
+
+  return (
+    <div className={`${dimensions} shrink-0 overflow-hidden rounded-md ${faded ? "opacity-45" : ""}`}>
+      <BackAsset height="100%" width="100%" />
     </div>
   );
 }
