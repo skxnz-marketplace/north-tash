@@ -1,17 +1,21 @@
 "use client";
 
 import {
+  ArrowLeft,
   ArrowRightLeft,
   Coins,
   Download,
+  LogIn,
   LogOut,
   Menu,
   Play,
+  Plus,
   RotateCcw,
   Trophy,
   Users,
   X,
 } from "lucide-react";
+import Image from "next/image";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, SVGProps } from "react";
 import { useLayoutEffect } from "react";
@@ -1622,32 +1626,36 @@ export function GameShell() {
 
   if (screen === "landing") {
     return (
-      <main className="min-h-screen bg-[#101410] text-[#f7f3e8]">
-        <PokerBackdrop />
-        <section className="relative mx-auto flex min-h-screen w-full max-w-md flex-col justify-end px-5 py-7 sm:justify-center">
-          <div className="mb-10">
-            <p className="text-sm font-semibold uppercase text-[#e2b653]">North Tash</p>
-            <h1 className="mt-2 text-5xl font-black leading-none text-white">Aflatoon</h1>
-            <p className="mt-3 max-w-xs text-base text-white/66">
-              Private rooms, fast chaals, jokers from the centre.
-            </p>
-          </div>
+      <main className="app-shell relative overflow-hidden">
+        <PokerBackdrop featured />
+        <section className="relative z-10 mx-auto flex min-h-[100svh] w-full max-w-6xl items-end px-5 py-7 sm:items-center sm:px-8 sm:py-10 lg:px-12">
+          <div className="relative w-full max-w-md">
+            <div className="homepage-copy mb-7 sm:mb-8">
+              <p className="text-xs font-bold uppercase text-[#f0ca6b]">North Tash</p>
+              <h1 className="mt-2 text-5xl font-black leading-none text-white sm:text-6xl">
+                Aflatoon
+              </h1>
+              <p className="mt-3 max-w-sm text-base font-medium text-white/78">
+                Your private table for a proper night of tash.
+              </p>
+            </div>
 
-          <EntryPanel
-            nameInputRef={nameInputRef}
-            playerName={playerName}
-            setPlayerName={setPlayerName}
-            onCreate={() => showCodeScreen("create")}
-            onJoin={() => showCodeScreen("join")}
-            onTestMode={() => setTestModeOpen(true)}
-          />
-          {testModeOpen ? (
-            <TestModePanel
-              name={playerName}
-              onBack={() => setTestModeOpen(false)}
-              onSelect={enterTestRoom}
+            <EntryPanel
+              nameInputRef={nameInputRef}
+              playerName={playerName}
+              setPlayerName={setPlayerName}
+              onCreate={() => showCodeScreen("create")}
+              onJoin={() => showCodeScreen("join")}
+              onTestMode={() => setTestModeOpen(true)}
             />
-          ) : null}
+            {testModeOpen ? (
+              <TestModePanel
+                name={playerName}
+                onBack={() => setTestModeOpen(false)}
+                onSelect={enterTestRoom}
+              />
+            ) : null}
+          </div>
         </section>
       </main>
     );
@@ -1655,11 +1663,11 @@ export function GameShell() {
 
   if (screen === "room-code") {
     return (
-      <main className="min-h-screen bg-[#101410] text-[#f7f3e8]">
+      <main className="app-shell relative overflow-hidden">
         <PokerBackdrop />
         <section className="relative mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-7">
           <BackButton onClick={() => setScreen("landing")} />
-          <section className="rounded-md border border-white/12 bg-[#171b17]/94 p-4 shadow-2xl shadow-black/50 backdrop-blur">
+          <section className="surface-panel p-5">
             <p className="text-sm font-semibold uppercase text-[#e2b653]">
               {roomMode === "create" ? "Room Created" : "Join Room"}
             </p>
@@ -1674,13 +1682,13 @@ export function GameShell() {
             <label className="mt-4 block text-sm font-semibold text-white/75">
               Room code
               {roomMode === "create" ? (
-                <div className="mt-2 grid h-16 place-items-center rounded-md border border-[#d2a84b]/50 bg-[#d2a84b]/12 font-mono text-3xl font-black text-[#f5d77d]">
+                <div className="subtle-panel mt-2 grid h-16 place-items-center border-[#d2a84b]/50 bg-[#d2a84b]/12 font-mono text-3xl font-black text-[#f5d77d]">
                   {roomCode}
                 </div>
               ) : (
                 <input
                   autoFocus
-                  className="mt-2 h-14 w-full rounded-md border border-white/12 bg-black/30 px-3 text-center font-mono text-2xl font-black text-white outline-none ring-[#d2a84b]/50 focus:ring-2"
+                  className="control-field mt-2 h-14 w-full px-3 text-center font-mono text-2xl font-black text-white outline-none"
                   inputMode="numeric"
                   maxLength={3}
                   placeholder="123"
@@ -1718,18 +1726,18 @@ export function GameShell() {
 
   if (screen === "buy-in") {
     return (
-      <main className="min-h-screen bg-[#101410] text-[#f7f3e8]">
+      <main className="app-shell relative overflow-hidden">
         <PokerBackdrop />
         <section className="relative mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-7">
           <BackButton onClick={() => setScreen("room-code")} />
-          <section className="rounded-md border border-white/12 bg-[#171b17]/94 p-4 shadow-2xl shadow-black/50 backdrop-blur">
+          <section className="surface-panel p-5">
             <p className="text-sm font-semibold uppercase text-[#e2b653]">Buy-in</p>
             <h1 className="mt-1 text-3xl font-black text-white">Start stack</h1>
             <p className="mt-2 text-sm text-white/60">
               Choose your starting stack before entering room {roomCode}.
             </p>
 
-            <div className="mt-5 rounded-md border border-white/10 bg-black/24 p-3">
+            <div className="subtle-panel mt-5 p-4">
               <div className="flex items-end justify-between">
                 <div>
                   <p className="text-xs uppercase text-white/50">Chips</p>
@@ -1769,7 +1777,7 @@ export function GameShell() {
     const lobbyIsHost = room?.hostId === currentPlayerId;
 
     return (
-      <main className="min-h-screen bg-[#101410] text-[#f7f3e8]">
+      <main className="app-shell relative overflow-hidden">
         <PokerBackdrop />
         <section className="relative mx-auto flex min-h-screen w-full max-w-3xl flex-col px-4 py-5">
           <header className="flex items-center justify-between">
@@ -1779,7 +1787,7 @@ export function GameShell() {
             </div>
             <button
               aria-label="Open table menu"
-              className="grid h-11 w-11 place-items-center rounded-md border border-white/12 bg-white/8 text-white"
+              className="icon-action grid h-11 w-11 place-items-center text-white"
               type="button"
               onClick={() => setMenuOpen(true)}
             >
@@ -1787,7 +1795,7 @@ export function GameShell() {
             </button>
           </header>
 
-          <section className="mt-5 rounded-md border border-white/10 bg-[#171b17]/94 p-4">
+          <section className="surface-panel mt-5 p-5">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-bold uppercase text-white/60">Players</h2>
               <span className="flex items-center gap-1 rounded-md bg-white/10 px-2 py-1 text-xs font-semibold">
@@ -1814,7 +1822,7 @@ export function GameShell() {
                   {room && room.players.length >= 2 ? "Start Hand" : "Waiting For Players"}
                 </PrimaryButton>
                 <button
-                  className="h-12 rounded-md border border-white/12 bg-white/8 text-sm font-semibold text-white"
+                  className="secondary-action h-12 text-sm font-semibold"
                   type="button"
                   onClick={endSession}
                 >
@@ -1850,7 +1858,7 @@ export function GameShell() {
 
   if (!table) {
     return (
-      <main className="grid min-h-screen place-items-center bg-[#101410] px-5 text-center text-white">
+      <main className="app-shell grid place-items-center px-5 text-center text-white">
         <div>
           <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/20 border-t-[#d2a84b]" />
           <p className="mt-4 text-sm font-semibold">Joining the table...</p>
@@ -1869,22 +1877,22 @@ export function GameShell() {
   const isHost = room?.hostId === currentPlayerId;
 
   return (
-    <main className="min-h-screen bg-[#101410] text-[#f7f3e8]">
+    <main className="app-shell text-[#f7f3e8]">
       <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
-        <header className="flex items-center justify-between border-b border-white/10 px-4 py-3 sm:px-6">
+        <header className="app-header sticky top-0 z-30 flex items-center justify-between border-b border-white/10 px-4 py-3 sm:px-6">
           <div>
             <p className="text-xs font-semibold uppercase text-[#d2a84b]">North Tash</p>
             <h1 className="text-xl font-black text-white">Aflatoon</h1>
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="rounded-md border border-white/12 bg-white/6 px-3 py-2 text-right">
+            <div className="subtle-panel px-3 py-2 text-right">
               <p className="text-xs text-white/50">Room</p>
               <p className="font-mono text-base font-bold">{table.roomCode}</p>
             </div>
             <button
               aria-label="Open table menu"
-              className="grid h-11 w-11 place-items-center rounded-md border border-white/12 bg-white/8 text-white"
+              className="icon-action grid h-11 w-11 place-items-center text-white"
               type="button"
               onClick={() => setMenuOpen(true)}
             >
@@ -1894,7 +1902,7 @@ export function GameShell() {
         </header>
 
         <div className="grid flex-1 gap-2 px-2 py-2 sm:gap-4 sm:px-3 sm:py-4 lg:grid-cols-[1fr_310px] lg:px-5">
-          <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-[#2f5c43] bg-[#123823] shadow-2xl shadow-black/35 lg:min-h-[720px]">
+          <section className="game-surface flex min-h-0 flex-col overflow-hidden bg-[#123823] lg:min-h-[720px]">
             <div className="grid grid-cols-3 items-center gap-2 border-b border-white/10 bg-black/25 px-3 py-3">
               <PotMetric chips={table.pot} />
               <Metric label="Turn" value={currentPlayer?.name ?? ""} sub={userCanAct ? "Your move" : "Wait"} />
@@ -1914,7 +1922,7 @@ export function GameShell() {
                   </div>
                 </div>
               ) : null}
-              <div className="center-chip-ledger relative z-10 mb-2 rounded-md border border-white/10 bg-black/30 px-2 py-2 backdrop-blur">
+              <div className="surface-panel-soft center-chip-ledger relative z-10 mb-2 px-2 py-2">
                 <ChipLedger potChips={table.pot} userPlayer={userPlayer} />
               </div>
               {chipMotion ? <ChipMotionOverlay motion={chipMotion} /> : null}
@@ -1968,7 +1976,7 @@ export function GameShell() {
             </div>
           </section>
 
-          <aside className="hidden min-h-[720px] flex-col rounded-md border border-white/10 bg-[#171b17] p-3 lg:flex">
+          <aside className="surface-panel hidden min-h-[720px] flex-col p-3 lg:flex">
             <TableSidebar table={table} currentPlayerId={currentPlayer?.id} />
           </aside>
         </div>
@@ -2047,25 +2055,28 @@ function EntryPanel({
   setPlayerName: (name: string) => void;
 }) {
   return (
-    <section className="rounded-md border border-white/12 bg-[#171b17]/92 p-4 shadow-2xl shadow-black/50 backdrop-blur">
+    <section className="surface-panel p-5 sm:p-6">
       <NameField
         nameInputRef={nameInputRef}
         playerName={playerName}
         setPlayerName={setPlayerName}
       />
-      <div className="mt-4 grid gap-3">
-        <PrimaryButton onClick={onCreate}>Create Room</PrimaryButton>
+      <div className="mt-5 grid gap-3">
+        <PrimaryButton onClick={onCreate}>
+          <Plus size={18} />
+          Create Room
+        </PrimaryButton>
         <button
-          className="flex h-12 items-center justify-center gap-2 rounded-md border border-white/15 bg-white/10 px-4 text-sm font-semibold text-white transition hover:bg-white/15"
+          className="secondary-action flex h-12 items-center justify-center gap-2 px-4 text-sm font-semibold"
           type="button"
           onClick={onJoin}
         >
-          <Play size={18} />
+          <LogIn size={18} />
           Join Room
         </button>
       </div>
       <button
-        className="mt-4 w-full border-t border-white/10 pt-3 text-xs font-semibold uppercase tracking-[0.18em] text-white/40 transition hover:text-[#e2b653]"
+        className="mt-5 w-full border-t border-white/10 pt-4 text-xs font-semibold uppercase text-white/42 hover:text-[#e2b653]"
         type="button"
         onClick={onTestMode}
       >
@@ -2085,23 +2096,25 @@ function TestModePanel({
   onSelect: (scenario: Exclude<TestRoomScenario, null>) => void;
 }) {
   return (
-    <section className="absolute inset-x-5 bottom-7 z-20 rounded-md border border-[#d2a84b]/45 bg-[#171b17]/98 p-4 shadow-2xl shadow-black/70 backdrop-blur sm:inset-x-0 sm:bottom-1/2 sm:translate-y-1/2">
+    <section className="modal-surface absolute inset-x-0 bottom-0 z-20 p-5 sm:bottom-1/2 sm:translate-y-1/2">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#e2b653]">Separate tools</p>
           <h2 className="mt-1 text-xl font-black text-white">Test mode</h2>
           <p className="mt-1 text-sm text-white/55">For chip-request and bot-owner checks only.</p>
         </div>
-        <button className="text-sm text-white/55" type="button" onClick={onBack}>Close</button>
+        <button className="icon-action grid h-9 w-9 place-items-center" aria-label="Close test mode" type="button" onClick={onBack}>
+          <X size={17} />
+        </button>
       </div>
-      <p className="mt-4 rounded-md border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/65">
+      <p className="subtle-panel mt-4 px-3 py-2 text-sm text-white/65">
         Player: {name || "Player"}
       </p>
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <button className="h-11 rounded-md border border-[#d2a84b]/40 bg-[#d2a84b]/12 text-sm font-bold text-[#f5d77d]" type="button" onClick={() => onSelect("bot-owner")}>
+        <button className="primary-action h-11 text-sm font-bold" type="button" onClick={() => onSelect("bot-owner")}>
           Bot owner test
         </button>
-        <button className="h-11 rounded-md border border-white/15 bg-white/8 text-sm font-bold text-white/75" type="button" onClick={() => onSelect("player-owner")}>
+        <button className="secondary-action h-11 text-sm font-bold" type="button" onClick={() => onSelect("player-owner")}>
           Player owner test
         </button>
       </div>
@@ -2119,10 +2132,10 @@ function NameField({
   setPlayerName: (name: string) => void;
 }) {
   return (
-    <label className="mt-5 block text-sm font-semibold text-white/75 first:mt-0">
+    <label className="mt-5 block text-xs font-bold uppercase text-white/62 first:mt-0">
       Name
       <input
-        className="mt-2 h-12 w-full rounded-md border border-white/12 bg-black/30 px-3 text-base text-white outline-none ring-[#d2a84b]/50 focus:ring-2"
+        className="control-field mt-2 h-12 w-full px-3 text-base font-medium normal-case text-white outline-none"
         maxLength={18}
         placeholder="Enter your name"
         ref={nameInputRef}
@@ -2137,10 +2150,11 @@ function NameField({
 function BackButton({ onClick }: { onClick: () => void }) {
   return (
     <button
-      className="mb-5 w-fit rounded-md border border-white/12 bg-white/8 px-3 py-2 text-sm text-white/75"
+      className="secondary-action mb-5 flex h-10 w-fit items-center gap-2 px-3 text-sm font-semibold"
       type="button"
       onClick={onClick}
     >
+      <ArrowLeft size={17} />
       Back
     </button>
   );
@@ -2157,7 +2171,7 @@ function PrimaryButton({
 }) {
   return (
     <button
-      className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#d2a84b] px-4 text-sm font-bold text-[#161812] transition hover:bg-[#ecc65f] disabled:cursor-wait disabled:opacity-60 first:mt-0"
+      className="primary-action mt-4 flex h-12 w-full items-center justify-center gap-2 px-4 text-sm font-bold disabled:cursor-wait disabled:opacity-60 first:mt-0"
       disabled={disabled}
       type="button"
       onClick={onClick}
@@ -2167,21 +2181,28 @@ function PrimaryButton({
   );
 }
 
-function PokerBackdrop() {
+function PokerBackdrop({ featured = false }: { featured?: boolean }) {
   return (
-    <div className="pointer-events-none fixed inset-0 overflow-hidden">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,#324d3b_0%,transparent_34%),radial-gradient(circle_at_80%_0%,#5a1f24_0%,transparent_28%),linear-gradient(135deg,#101410_0%,#17231a_45%,#0b0e0d_100%)]" />
-      <div className="absolute left-[-30px] top-16 h-44 w-32 rotate-[-18deg] rounded-md border border-white/15 bg-[#f7f3e8]/8" />
-      <div className="absolute right-[-20px] top-40 h-44 w-32 rotate-[16deg] rounded-md border border-[#d2a84b]/25 bg-[#f7f3e8]/10" />
-      <div className="absolute bottom-20 left-10 h-24 w-24 rounded-full border-[14px] border-[#d2a84b]/35 bg-[#8c2028]/45" />
-      <div className="absolute bottom-[-28px] right-12 h-28 w-28 rounded-full border-[16px] border-[#f0d06d]/25 bg-[#123823]/70" />
+    <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
+      <Image
+        alt=""
+        className={`object-cover ${featured ? "object-[52%_50%] sm:object-[center_48%]" : "object-[52%_50%] opacity-25"}`}
+        fill
+        priority={featured}
+        sizes="100vw"
+        src="/north-tash-home.jpg"
+      />
+      <div className={`absolute inset-0 ${featured ? "bg-black/35" : "bg-[#07100c]/78"}`} />
+      {featured ? (
+        <div className="absolute inset-y-0 left-0 w-full bg-[#07100c]/35 sm:w-[58%] sm:bg-[#07100c]/68" />
+      ) : null}
     </div>
   );
 }
 
 function LobbyPlayerRow({ player }: { player: LobbyPlayer }) {
   return (
-    <div className="flex items-center gap-3 rounded-md border border-white/10 bg-black/24 p-3">
+    <div className="subtle-panel flex items-center gap-3 p-3">
       <div className="grid h-11 w-11 place-items-center rounded-full bg-[#f7f3e8] font-black text-[#101410]">
         {initials(player.name)}
       </div>
@@ -2228,7 +2249,7 @@ function UserPanel({
   );
 
   return (
-    <div className="rounded-md border border-white/15 bg-black/36 p-3 shadow-xl shadow-black/30 backdrop-blur">
+    <div className="surface-panel-soft p-3 shadow-xl shadow-black/25">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs uppercase text-white/50">Your hand</p>
@@ -2262,13 +2283,13 @@ function UserPanel({
       </div>
 
       {tablePhase === "hand-complete" ? (
-        <div className="mt-4 rounded-md border border-white/10 bg-white/6 px-3 py-3 text-center text-sm text-white/60">
+        <div className="subtle-panel mt-4 px-3 py-3 text-center text-sm text-white/60">
           Waiting for the host to start the new round
         </div>
       ) : (
         <div className="mt-4 grid grid-cols-3 gap-2">
           <button
-            className="h-12 rounded-md bg-[#d2a84b] text-sm font-black text-[#161812] disabled:cursor-not-allowed disabled:opacity-45"
+            className="primary-action h-12 text-sm font-black disabled:cursor-not-allowed disabled:opacity-45"
             disabled={!isCurrent}
             type="button"
             onClick={onChaal}
@@ -2276,7 +2297,7 @@ function UserPanel({
             Chaal
           </button>
           <button
-            className="h-12 rounded-md border border-white/15 bg-white/10 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+            className="secondary-action h-12 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
             disabled={!isCurrent}
             type="button"
             onClick={onBackShow}
@@ -2284,7 +2305,7 @@ function UserPanel({
             {showLabel}
           </button>
           <button
-            className="h-12 rounded-md border border-[#b95f5f]/60 bg-[#451c1f] text-sm font-semibold text-[#ffd7d7] disabled:cursor-not-allowed disabled:opacity-45"
+            className="danger-action h-12 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45"
             disabled={!isCurrent}
             type="button"
             onClick={onFold}
@@ -2717,21 +2738,21 @@ function IncomingChipRequestModal({
   onReject: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-[65] grid place-items-center bg-black/70 px-4">
-      <section className="w-full max-w-sm rounded-md border border-[#d2a84b]/45 bg-[#171b17] p-4 text-center shadow-2xl shadow-black">
+    <div className="modal-backdrop fixed inset-0 z-[65] grid place-items-center px-4">
+      <section className="modal-surface w-full max-w-sm p-5 text-center">
         <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#e2b653]">Chip request</p>
         <h2 className="mt-1 text-2xl font-black text-white">{fromName} needs chips</h2>
         <p className="mt-2 text-sm text-white/60">Send {amount} chips from your stack?</p>
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button
-            className="h-12 rounded-md border border-white/15 bg-white/10 text-sm font-semibold text-white"
+            className="secondary-action h-12 text-sm font-semibold"
             type="button"
             onClick={onReject}
           >
             Reject
           </button>
           <button
-            className="h-12 rounded-md bg-[#d2a84b] text-sm font-black text-[#161812]"
+            className="primary-action h-12 text-sm font-black"
             type="button"
             onClick={onApprove}
           >
@@ -2751,20 +2772,20 @@ function FoldConfirmOverlay({
   onConfirm: () => void;
 }) {
   return (
-    <div className="absolute left-1/2 top-[46%] z-40 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-md border border-[#b95f5f]/60 bg-[#241517]/96 p-4 text-center shadow-2xl shadow-black/60 backdrop-blur">
+    <div className="modal-surface absolute left-1/2 top-[46%] z-40 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 border-[#b95f5f]/60 p-5 text-center">
       <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#ffb4b4]">Confirm action</p>
       <h2 className="mt-1 text-2xl font-black text-white">Fold this hand?</h2>
       <p className="mt-1 text-sm text-white/60">You will leave the current hand and cannot undo this.</p>
       <div className="mt-4 grid grid-cols-2 gap-2">
         <button
-          className="h-12 rounded-md border border-white/15 bg-white/10 text-sm font-semibold text-white"
+          className="secondary-action h-12 text-sm font-semibold"
           type="button"
           onClick={onCancel}
         >
           Cancel
         </button>
         <button
-          className="h-12 rounded-md bg-[#b94d55] text-sm font-black text-white"
+          className="danger-action h-12 text-sm font-black"
           type="button"
           onClick={onConfirm}
         >
@@ -2790,7 +2811,7 @@ function ShowdownResultPanel({ table }: { table: TableState }) {
     : "Split hand";
 
   return (
-    <div className="showdown-panel absolute left-0 right-0 top-[45%] z-40 mx-auto w-[calc(100%-1.25rem)] max-w-md rounded-md border border-[#d2a84b]/55 bg-[#111710]/96 p-3 text-center shadow-2xl shadow-black/60 backdrop-blur">
+    <div className="modal-surface showdown-panel absolute left-0 right-0 top-[45%] z-40 mx-auto w-[calc(100%-1.25rem)] max-w-md border-[#d2a84b]/55 p-4 text-center">
       <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#e2b653]">Showdown</p>
       <h2 className="mt-1 text-2xl font-black text-white">
         {resolution.outcome === "split" ? "Split hand" : `${winnerName} wins`}
@@ -2883,21 +2904,21 @@ function ShowResponseModal({
     AFLATOON_RULES.declinesPerHand;
 
   return (
-    <div className="absolute inset-x-4 top-[56%] z-30 mx-auto max-w-sm -translate-y-1/2 rounded-md border border-[#d2a84b]/45 bg-[#141712]/96 p-4 text-center shadow-2xl shadow-black/55 backdrop-blur">
+    <div className="modal-surface absolute inset-x-4 top-[56%] z-30 mx-auto max-w-sm -translate-y-1/2 border-[#d2a84b]/45 p-5 text-center">
       <p className="text-xs uppercase text-[#e2b653]">{label} request</p>
       <h3 className="mt-1 text-xl font-black text-white">
         {requester?.name ?? "Player"} vs {defender?.name ?? "You"}
       </h3>
       <div className="mt-4 grid grid-cols-2 gap-2">
         <button
-          className="h-12 rounded-md bg-[#d2a84b] text-sm font-black text-[#161812]"
+          className="primary-action h-12 text-sm font-black"
           type="button"
           onClick={onAccept}
         >
           Accept
         </button>
         <button
-          className="h-12 rounded-md border border-[#e2b653]/45 bg-[#4d3510] text-sm font-bold text-[#ffe7ad] disabled:cursor-not-allowed disabled:opacity-40"
+          className="secondary-action h-12 border-[#e2b653]/45 text-sm font-bold text-[#ffe7ad] disabled:cursor-not-allowed disabled:opacity-40"
           disabled={!declineAvailable}
           type="button"
           onClick={onDecline}
@@ -2972,8 +2993,8 @@ function TableMenu({
   const chipActionPrefix = userIsHost ? "Add" : "Request";
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60">
-      <aside className="ml-auto flex h-full w-full max-w-sm flex-col border-l border-white/10 bg-[#171b17] p-4 shadow-2xl shadow-black">
+    <div className="modal-backdrop fixed inset-0 z-50">
+      <aside className="drawer-surface ml-auto flex h-full w-full max-w-sm flex-col p-5">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-xs uppercase text-white/50">Menu</p>
@@ -2981,7 +3002,7 @@ function TableMenu({
           </div>
           <button
             aria-label="Close menu"
-            className="grid h-10 w-10 place-items-center rounded-md border border-white/12 bg-white/8"
+            className="icon-action grid h-10 w-10 place-items-center"
             type="button"
             onClick={onClose}
           >
@@ -3030,11 +3051,11 @@ function TableMenu({
         </div>
 
         {isHost && chipRequests.length > 0 && onApproveChipRequest && onRejectChipRequest ? (
-          <section className="mt-5 rounded-md border border-[#d2a84b]/25 bg-[#d2a84b]/10 p-3">
+          <section className="subtle-panel mt-5 border-[#d2a84b]/25 bg-[#d2a84b]/10 p-3">
             <h2 className="text-sm font-black uppercase text-[#f5d77d]">Chip Requests</h2>
             <div className="mt-3 grid gap-2">
               {chipRequests.map((request) => (
-                <div className="rounded-md border border-white/10 bg-black/25 p-2" key={request.id}>
+                <div className="subtle-panel p-2" key={request.id}>
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-bold text-white">{request.playerName}</p>
@@ -3042,14 +3063,14 @@ function TableMenu({
                     </div>
                     <div className="flex gap-1">
                       <button
-                        className="h-9 rounded-md bg-[#d2a84b] px-2 text-xs font-black text-[#161812]"
+                        className="primary-action h-9 px-2 text-xs font-black"
                         type="button"
                         onClick={() => onApproveChipRequest(request.id)}
                       >
                         Approve
                       </button>
                       <button
-                        className="h-9 rounded-md border border-[#e2b653]/35 bg-[#4d3510] px-2 text-xs font-bold text-[#ffe7ad]"
+                        className="secondary-action h-9 border-[#e2b653]/35 px-2 text-xs font-bold text-[#ffe7ad]"
                         type="button"
                         onClick={() => onRejectChipRequest(request.id)}
                       >
@@ -3088,11 +3109,7 @@ function MenuButton({
 }) {
   return (
     <button
-      className={`flex h-12 items-center gap-3 rounded-md border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-45 ${
-        danger
-          ? "border-[#b95f5f]/50 bg-[#451c1f] text-[#ffd7d7]"
-          : "border-white/12 bg-white/8 text-white hover:bg-white/12"
-      }`}
+      className={`flex h-12 items-center gap-3 px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-45 ${danger ? "danger-action" : "secondary-action"}`}
       disabled={disabled}
       type="button"
       onClick={onClick}
@@ -3114,8 +3131,8 @@ function PlayerRow({
 }) {
   return (
     <div
-      className={`flex items-center gap-3 rounded-md border p-2 ${
-        current ? "border-[#d2a84b]/70 bg-[#d2a84b]/10" : "border-white/10 bg-black/20"
+      className={`flex items-center gap-3 rounded-md border p-2.5 ${
+        current ? "border-[#d2a84b]/70 bg-[#d2a84b]/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]" : "border-white/10 bg-black/20"
       }`}
     >
       <div className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-[#244b36] text-sm font-bold">
@@ -3213,8 +3230,8 @@ function TransferRequestModal({
   );
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/70 px-4">
-      <section className="w-full max-w-sm rounded-md border border-white/12 bg-[#171b17] p-4 shadow-2xl shadow-black">
+    <div className="modal-backdrop fixed inset-0 z-[60] grid place-items-center px-4">
+      <section className="modal-surface w-full max-w-sm p-5">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-xs uppercase text-[#e2b653]">Player transfer</p>
@@ -3222,7 +3239,7 @@ function TransferRequestModal({
           </div>
           <button
             aria-label="Close transfer request"
-            className="grid h-10 w-10 place-items-center rounded-md border border-white/12 bg-white/8"
+            className="icon-action grid h-10 w-10 place-items-center"
             type="button"
             onClick={onCancel}
           >
@@ -3233,7 +3250,7 @@ function TransferRequestModal({
         <label className="mt-4 block text-sm font-semibold text-white/70">
           Ask player
           <select
-            className="mt-2 h-12 w-full rounded-md border border-white/12 bg-black/35 px-3 text-white"
+            className="control-field mt-2 h-12 w-full px-3 text-white"
             value={draft.targetId}
             onChange={(event) => onChange({ ...draft, targetId: event.target.value })}
           >
@@ -3248,7 +3265,7 @@ function TransferRequestModal({
         <label className="mt-4 block text-sm font-semibold text-white/70">
           Whole chips
           <input
-            className="mt-2 h-12 w-full rounded-md border border-white/12 bg-black/35 px-3 text-white"
+            className="control-field mt-2 h-12 w-full px-3 text-white"
             inputMode="numeric"
             min={1}
             type="number"
@@ -3260,7 +3277,7 @@ function TransferRequestModal({
         </label>
 
         <button
-          className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#d2a84b] text-sm font-black text-[#161812]"
+          className="primary-action mt-4 flex h-12 w-full items-center justify-center gap-2 text-sm font-black"
           type="button"
           onClick={onSubmit}
         >
@@ -3357,8 +3374,8 @@ function SessionTallyModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center bg-black/70 px-4">
-      <section className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-md border border-white/12 bg-[#171b17] p-4 shadow-2xl shadow-black">
+    <div className="modal-backdrop fixed inset-0 z-[60] grid place-items-center px-4">
+      <section className="modal-surface max-h-[90vh] w-full max-w-lg overflow-y-auto p-5">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-xs uppercase text-[#e2b653]">Session End</p>
@@ -3366,7 +3383,7 @@ function SessionTallyModal({
           </div>
           <button
             aria-label="Close tally"
-            className="grid h-10 w-10 place-items-center rounded-md border border-white/12 bg-white/8"
+            className="icon-action grid h-10 w-10 place-items-center"
             type="button"
             onClick={onClose}
           >
@@ -3447,7 +3464,7 @@ function SessionTallyModal({
         ) : null}
 
         <button
-          className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#d2a84b] text-sm font-black text-[#161812]"
+          className="primary-action mt-4 flex h-12 w-full items-center justify-center gap-2 text-sm font-black"
           type="button"
           onClick={downloadTally}
         >
