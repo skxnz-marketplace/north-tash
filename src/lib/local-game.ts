@@ -7,6 +7,8 @@ import {
   resolveShowComparison,
 } from "./aflatoon.ts";
 import type { Card, ShowResolution } from "./aflatoon.ts";
+import type { TableGameMode } from "./game-rules.ts";
+import type { TexasHoldemState } from "./poker.ts";
 
 export type TablePhase = "collecting-boots" | "playing" | "hand-complete";
 export type PlayerStatus = "active" | "folded" | "eliminated" | "standing";
@@ -61,6 +63,7 @@ export interface PlayerSettlement {
 }
 
 export interface TableState {
+  gameMode?: TableGameMode;
   roomCode: string;
   userId: string;
   phase: TablePhase;
@@ -94,6 +97,7 @@ export interface TableState {
   pendingBuyInRequests?: BuyInRequest[];
   pendingTransferRequests?: TransferRequest[];
   transferLedger?: TransferLedgerEntry[];
+  poker?: TexasHoldemState;
 }
 
 const SEATS = ["South", "West", "North", "East", "Far West", "Far East", "Top"];
@@ -221,6 +225,7 @@ function prepareNewHand(input: {
   const dealerIndex = clampSeatIndex(input.dealerIndex, players);
 
   return {
+    gameMode: "AFLATOON",
     roomCode: input.roomCode,
     userId: input.userId,
     phase: "collecting-boots",
@@ -310,6 +315,7 @@ export function dealNewHand(input: {
   const center = describeCenterCard(activeCenter);
 
   return {
+    gameMode: "AFLATOON",
     roomCode: input.roomCode,
     userId: input.userId,
     phase: "playing",
@@ -1085,6 +1091,28 @@ function cloneState(state: TableState): TableState {
     pendingBuyInRequests: state.pendingBuyInRequests?.map((request) => ({ ...request })),
     pendingTransferRequests: state.pendingTransferRequests?.map((request) => ({ ...request })),
     transferLedger: state.transferLedger?.map((entry) => ({ ...entry })),
+    poker: state.poker
+      ? {
+          ...state.poker,
+          communityCards: state.poker.communityCards.map((card) => ({ ...card })),
+          burnCards: state.poker.burnCards.map((card) => ({ ...card })),
+          deck: state.poker.deck.map((card) => ({ ...card })),
+          players: state.poker.players.map((player) => ({
+            ...player,
+            holeCards: player.holeCards.map((card) => ({ ...card })),
+          })),
+          pots: state.poker.pots.map((pot) => ({
+            ...pot,
+            contributorPlayerIds: [...pot.contributorPlayerIds],
+            eligiblePlayerIds: [...pot.eligiblePlayerIds],
+          })),
+          events: [...state.poker.events],
+          winners: state.poker.winners?.map((winner) => ({
+            ...winner,
+            bestCards: winner.bestCards?.map((card) => ({ ...card })),
+          })),
+        }
+      : undefined,
   };
 }
 
