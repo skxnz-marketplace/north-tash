@@ -7,12 +7,11 @@ export function getSupabaseBrowserClient() {
     return null;
   }
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-
-  if (!url || !key || url.includes("your-project")) {
-    return null;
-  }
+  const url =
+    process.env.NEXT_PUBLIC_SUPABASE_URL ?? "https://xrltntqkwckdshmyvdjb.supabase.co";
+  const key =
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
+    "sb_publishable_7u0H1nFaH7ybaXV2rhx2KQ_otS5VErj";
 
   browserClient ??= createClient(url, key, {
     auth: {
@@ -26,9 +25,5 @@ export function getSupabaseBrowserClient() {
 }
 
 export function isSupabaseConfigured() {
-  return Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY &&
-      !process.env.NEXT_PUBLIC_SUPABASE_URL.includes("your-project"),
-  );
+  return true;
 }

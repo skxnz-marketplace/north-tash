@@ -479,15 +479,18 @@ export function GameShell() {
         try {
           const joined = await joinMultiplayerRoom(roomCode, playerId);
           onlineRoom = joined?.snapshot.room as unknown as RoomState;
-        } catch {
-          showOverlay("Could not join the online room", "warn");
+        } catch (error) {
+          setFormError(
+            error instanceof Error ? error.message : `Room ${roomCode} could not be joined.`,
+          );
+          return;
         }
       }
 
-      const baseRoom = onlineRoom ?? existingRoom;
+      const baseRoom = isSupabaseConfigured() ? onlineRoom : existingRoom;
 
       if (!baseRoom) {
-        setFormError(`Room ${roomCode} was not found.`);
+        setFormError(`Room ${roomCode} was not found online.`);
         return;
       }
 
@@ -919,8 +922,6 @@ export function GameShell() {
             setPlayerName={setPlayerName}
             onCreate={() => showCodeScreen("create")}
             onJoin={() => showCodeScreen("join")}
-            onBotOwnerTest={() => enterTestRoom("bot-owner")}
-            onPlayerOwnerTest={() => enterTestRoom("player-owner")}
           />
         </section>
       </main>
@@ -1268,18 +1269,14 @@ export function GameShell() {
 
 function EntryPanel({
   nameInputRef,
-  onBotOwnerTest,
   onCreate,
   onJoin,
-  onPlayerOwnerTest,
   playerName,
   setPlayerName,
 }: {
   nameInputRef: React.RefObject<HTMLInputElement | null>;
-  onBotOwnerTest: () => void;
   onCreate: () => void;
   onJoin: () => void;
-  onPlayerOwnerTest: () => void;
   playerName: string;
   setPlayerName: (name: string) => void;
 }) {
@@ -1300,22 +1297,6 @@ function EntryPanel({
           <Play size={18} />
           Join Room
         </button>
-        <div className="grid grid-cols-2 gap-2 border-t border-white/10 pt-3">
-          <button
-            className="h-10 rounded-md border border-[#d2a84b]/35 bg-[#d2a84b]/10 px-2 text-xs font-bold text-[#f5d77d]"
-            type="button"
-            onClick={onBotOwnerTest}
-          >
-            Bot Owner Test
-          </button>
-          <button
-            className="h-10 rounded-md border border-white/15 bg-white/8 px-2 text-xs font-bold text-white/75"
-            type="button"
-            onClick={onPlayerOwnerTest}
-          >
-            Owner Test
-          </button>
-        </div>
       </div>
     </section>
   );
