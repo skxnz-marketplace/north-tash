@@ -19,10 +19,13 @@ import { gsap } from "gsap";
 import * as PlayingCards from "@letele/playing-cards/dist/index.esm.js";
 import {
   createMultiplayerRoom,
+  cleanupOwnStaleMemberships,
   ensureAnonymousSession,
   joinMultiplayerRoom,
+  leaveMultiplayerRoom,
   saveMultiplayerSnapshot,
   subscribeToMultiplayerRoom,
+  touchMultiplayerMembership,
   withMultiplayerTimeout,
 } from "@/lib/multiplayer-room";
 import { isSupabaseConfigured } from "@/lib/supabase-client";
@@ -210,6 +213,33 @@ export function GameShell() {
 
     return unsubscribe;
   }, [currentPlayerId, room?.code]);
+
+  useEffect(() => {
+    if (!room?.code || !onlineUserId || testRoomScenario) {
+      return;
+    }
+
+    const heartbeat = window.setInterval(() => {
+      void touchMultiplayerMembership(room.code, onlineUserId).catch(() => undefined);
+    }, 10000);
+
+    return () => window.clearInterval(heartbeat);
+  }, [onlineUserId, room?.code, testRoomScenario]);
+
+  useEffect(() => {
+    if (!room?.code || !onlineUserId || testRoomScenario) {
+      return;
+    }
+
+    const cleanup = () => {
+      void leaveMultiplayerRoom(room.code, onlineUserId, room.hostId === currentPlayerId).catch(
+        () => undefined,
+      );
+    };
+
+    window.addEventListener("pagehide", cleanup);
+    return () => window.removeEventListener("pagehide", cleanup);
+  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId, testRoomScenario]);
 
   useEffect(() => {
     const startAt = table?.startAt;
@@ -466,6 +496,7 @@ export function GameShell() {
         }
 
         const playerId = `p-${userId}`;
+        await cleanupOwnStaleMemberships(userId);
         const joined = await joinMultiplayerRoom(code, {
           id: playerId,
           name,
@@ -789,12 +820,22 @@ export function GameShell() {
   }
 
   function endSession() {
+    if (room?.code && onlineUserId) {
+      void leaveMultiplayerRoom(room.code, onlineUserId, room.hostId === currentPlayerId).catch(
+        () => undefined,
+      );
+    }
     setSessionEnded(true);
     setSessionTallyOpen(true);
     setMenuOpen(false);
   }
 
   function leaveTable() {
+    if (room?.code && onlineUserId) {
+      void leaveMultiplayerRoom(room.code, onlineUserId, room.hostId === currentPlayerId).catch(
+        () => undefined,
+      );
+    }
     setTable(null);
     setRoom(null);
     setTestRoomScenario(null);

@@ -176,6 +176,75 @@ export async function saveMultiplayerSnapshot(code: string, snapshot: Multiplaye
   }
 }
 
+export async function touchMultiplayerMembership(code: string, userId: string) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return;
+  }
+
+  const { error } = await supabase
+    .from("game_room_members")
+    .update({ last_seen_at: new Date().toISOString() })
+    .eq("room_code", code)
+    .eq("user_id", userId);
+
+  if (error) {
+    throw error;
+  }
+}
+
+export async function cleanupOwnStaleMemberships(userId: string) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return 0;
+  }
+
+  const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const { error } = await supabase
+    .from("game_room_members")
+    .delete()
+    .eq("user_id", userId)
+    .lt("last_seen_at", cutoff);
+
+  if (error) {
+    throw error;
+  }
+}
+
+export async function leaveMultiplayerRoom(code: string, userId: string, isHost: boolean) {
+  const supabase = getSupabaseBrowserClient();
+
+  if (!supabase) {
+    return;
+  }
+
+  if (isHost) {
+    const { error } = await supabase
+      .from("game_rooms")
+      .delete()
+      .eq("code", code)
+      .eq("host_user_id", userId);
+
+    if (error) {
+      throw error;
+    }
+
+    return;
+  }
+
+  const { error } = await supabase
+    .from("game_room_members")
+    .delete()
+    .eq("room_code", code)
+    .eq("user_id", userId);
+
+  if (error) {
+    throw error;
+  }
+}
+
 export function subscribeToMultiplayerRoom(
   code: string,
   onSnapshot: (snapshot: MultiplayerSnapshot) => void,
