@@ -48,6 +48,7 @@ export interface TableState {
   actionCount: number;
   lastShow?: ShowResolution;
   log: ActionLogEntry[];
+  startAt?: number;
 }
 
 const SEATS = ["South", "West", "North", "East", "Far West", "Far East", "Top"];
@@ -118,6 +119,7 @@ export function createTableFromPlayers(input: {
     isHost?: boolean;
   }>;
   seed?: number;
+  startAt?: number;
 }) {
   const players = input.players
     .slice(0, AFLATOON_RULES.maxPlayers)
@@ -143,6 +145,7 @@ export function createTableFromPlayers(input: {
     handNumber: 1,
     carryOverPot: 0,
     seed: input.seed,
+    startAt: input.startAt,
     openingLog: `Room ${input.roomCode} started with ${players.length} players.`,
   });
 }
@@ -156,6 +159,7 @@ export function dealNewHand(input: {
   carryOverPot: number;
   seed?: number;
   openingLog?: string;
+  startAt?: number;
 }): TableState {
   const seatedPlayers = input.players.filter((player) => player.status !== "standing");
 
@@ -225,6 +229,7 @@ export function dealNewHand(input: {
         "neutral",
       ),
     ],
+    startAt: input.startAt,
   };
 }
 
