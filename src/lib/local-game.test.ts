@@ -14,7 +14,11 @@ import {
   getActiveCenter,
   getCurrentPlayer,
   playChaal,
+  queueBuyInRequest,
+  queueTransferRequest,
   requestFinalShow,
+  resolveBuyInRequest,
+  resolveTransferRequest,
   respondToShowRequest,
   shuffleDeck,
   startNextHand,
@@ -68,6 +72,28 @@ test("chaal automatically advances the centre card and turn", () => {
   assert.notDeepEqual(getActiveCenter(next), oldCenter);
   assert.equal(next.pot, oldPot + AFLATOON_RULES.fixedChaalChips);
   assert.notEqual(getCurrentPlayer(next).id, player.id);
+});
+
+test("turns visit every active seat exactly once for two through five players", () => {
+  for (let playerCount = 2; playerCount <= 5; playerCount += 1) {
+    let table = createLocalTable({
+      roomCode: String(120 + playerCount),
+      userName: "Player 1",
+      botNames: Array.from({ length: playerCount - 1 }, (_, index) => `Player ${index + 2}`),
+      seed: 40 + playerCount,
+    });
+    const firstPlayerId = getCurrentPlayer(table).id;
+    const visited = new Set<string>();
+
+    for (let turn = 0; turn < playerCount; turn += 1) {
+      const current = getCurrentPlayer(table);
+      visited.add(current.id);
+      table = playChaal(table, current.id);
+    }
+
+    assert.equal(visited.size, playerCount);
+    assert.equal(getCurrentPlayer(table).id, firstPlayerId);
+  }
 });
 
 test("mode and jokers follow the active centre after automatic chaal", () => {
@@ -158,6 +184,62 @@ test("player transfers support full or partial whole-chip approval without chang
   assert.equal(next.players[1].transferBalanceChips, -4);
   assert.equal(next.players[0].transferBalanceChips, 4);
   assert.equal(next.players[0].totalBuyInChips, receiver.totalBuyInChips);
+});
+
+test("buy-in requests persist until the owner resolves them", () => {
+  const table = createLocalTable({
+    roomCode: "123",
+    userName: "Owner",
+    botNames: ["Guest"],
+    seed: 14,
+  });
+  const guest = table.players[1];
+  const queued = queueBuyInRequest(table, {
+    id: "buy-1",
+    playerId: guest.id,
+    playerName: guest.name,
+    chips: 10,
+  });
+  const resolved = resolveBuyInRequest(queued, "buy-1", "accept");
+
+  assert.equal(queued.pendingBuyInRequests?.length, 1);
+  assert.equal(resolved.pendingBuyInRequests?.length, 0);
+  assert.equal(resolved.players[1].chips, guest.chips + 10);
+  assert.equal(resolved.players[1].totalBuyInChips, guest.totalBuyInChips + 10);
+});
+
+test("personal chip requests cannot target self and only the target can resolve them", () => {
+  const table = createLocalTable({
+    roomCode: "123",
+    userName: "Goat",
+    botNames: ["Jahan", "Third"],
+    seed: 15,
+  });
+  const requester = table.players[0];
+  const target = table.players[1];
+  const selfRequest = queueTransferRequest(table, {
+    id: "transfer-self",
+    requesterId: requester.id,
+    requesterName: requester.name,
+    targetId: requester.id,
+    amount: 3,
+  });
+  const queued = queueTransferRequest(table, {
+    id: "transfer-1",
+    requesterId: requester.id,
+    requesterName: requester.name,
+    targetId: target.id,
+    amount: 3,
+  });
+  const wrongResponder = resolveTransferRequest(queued, "transfer-1", table.players[2].id, "accept");
+  const resolved = resolveTransferRequest(queued, "transfer-1", target.id, "accept");
+
+  assert.equal(selfRequest, table);
+  assert.equal(queued.pendingTransferRequests?.length, 1);
+  assert.equal(wrongResponder, queued);
+  assert.equal(resolved.pendingTransferRequests?.length, 0);
+  assert.equal(resolved.players[0].chips, requester.chips + 3);
+  assert.equal(resolved.players[1].chips, target.chips - 3);
 });
 
 test("a third decline request is forced to accept", () => {

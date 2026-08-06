@@ -32,6 +32,21 @@ export interface ActionLogEntry {
   tone: LogTone;
 }
 
+export interface BuyInRequest {
+  id: string;
+  playerId: string;
+  playerName: string;
+  chips: 10 | 20;
+}
+
+export interface TransferRequest {
+  id: string;
+  requesterId: string;
+  requesterName: string;
+  targetId: string;
+  amount: number;
+}
+
 export interface TableState {
   roomCode: string;
   userId: string;
@@ -62,6 +77,8 @@ export interface TableState {
     viewerIds: string[];
     expiresAt: number;
   };
+  pendingBuyInRequests?: BuyInRequest[];
+  pendingTransferRequests?: TransferRequest[];
 }
 
 const SEATS = ["South", "West", "North", "East", "Far West", "Far East", "Top"];
@@ -523,6 +540,113 @@ export function transferPlayerChips(
   );
 }
 
+export function queueBuyInRequest(
+  state: TableState,
+  request: BuyInRequest,
+): TableState {
+  const player = state.players.find((candidate) => candidate.id === request.playerId);
+  const pendingRequests = state.pendingBuyInRequests ?? [];
+
+  if (
+    !player ||
+    (request.chips !== 10 && request.chips !== 20) ||
+    pendingRequests.some((pending) => pending.playerId === request.playerId)
+  ) {
+    return state;
+  }
+
+  return {
+    ...state,
+    pendingBuyInRequests: [
+      ...pendingRequests,
+      { ...request, playerName: player.name },
+    ],
+  };
+}
+
+export function resolveBuyInRequest(
+  state: TableState,
+  requestId: string,
+  response: "accept" | "decline",
+): TableState {
+  const request = state.pendingBuyInRequests?.find((candidate) => candidate.id === requestId);
+
+  if (!request) {
+    return state;
+  }
+
+  const withoutRequest = {
+    ...state,
+    pendingBuyInRequests: state.pendingBuyInRequests?.filter(
+      (candidate) => candidate.id !== requestId,
+    ),
+  };
+
+  return response === "accept"
+    ? buyInChips(withoutRequest, request.playerId, request.chips)
+    : appendLog(withoutRequest, `${request.playerName}'s buy-in request was declined.`, "warn");
+}
+
+export function queueTransferRequest(
+  state: TableState,
+  request: TransferRequest,
+): TableState {
+  const requester = state.players.find((player) => player.id === request.requesterId);
+  const target = state.players.find((player) => player.id === request.targetId);
+  const pendingRequests = state.pendingTransferRequests ?? [];
+
+  if (
+    !requester ||
+    !target ||
+    requester.id === target.id ||
+    requester.status === "standing" ||
+    target.status === "standing" ||
+    !Number.isInteger(request.amount) ||
+    request.amount < 1 ||
+    pendingRequests.some((pending) => pending.requesterId === request.requesterId)
+  ) {
+    return state;
+  }
+
+  return {
+    ...state,
+    pendingTransferRequests: [
+      ...pendingRequests,
+      { ...request, requesterName: requester.name },
+    ],
+  };
+}
+
+export function resolveTransferRequest(
+  state: TableState,
+  requestId: string,
+  responderId: string,
+  response: "accept" | "decline",
+): TableState {
+  const request = state.pendingTransferRequests?.find(
+    (candidate) => candidate.id === requestId,
+  );
+
+  if (!request || request.targetId !== responderId) {
+    return state;
+  }
+
+  const withoutRequest = {
+    ...state,
+    pendingTransferRequests: state.pendingTransferRequests?.filter(
+      (candidate) => candidate.id !== requestId,
+    ),
+  };
+
+  return transferPlayerChips(
+    withoutRequest,
+    responderId,
+    request.requesterId,
+    request.amount,
+    response === "accept" ? request.amount : 0,
+  );
+}
+
 export function standPlayer(state: TableState, playerId: string): TableState {
   const folded = foldPlayer(state, playerId);
   const nextState = cloneState(folded);
@@ -729,6 +853,8 @@ function cloneState(state: TableState): TableState {
     privateReveal: state.privateReveal
       ? { ...state.privateReveal, playerIds: [...state.privateReveal.playerIds], viewerIds: [...state.privateReveal.viewerIds] }
       : undefined,
+    pendingBuyInRequests: state.pendingBuyInRequests?.map((request) => ({ ...request })),
+    pendingTransferRequests: state.pendingTransferRequests?.map((request) => ({ ...request })),
   };
 }
 
