@@ -57,14 +57,18 @@ import {
   getCurrentPlayer,
   makeRoomCode,
   playChaal,
+  queueBuyInRequest,
+  queueTransferRequest,
   requestBackShow,
+  resolveBuyInRequest,
+  resolveTransferRequest,
   respondToShowRequest,
   runBotTurn,
   standPlayer,
   startNextHand,
   transferPlayerChips,
 } from "@/lib/local-game";
-import type { LogTone, TablePlayer, TableState } from "@/lib/local-game";
+import type { BuyInRequest, LogTone, TablePlayer, TableState } from "@/lib/local-game";
 
 type Screen = "landing" | "room-code" | "buy-in" | "lobby" | "table";
 type RoomMode = "create" | "join";
@@ -93,13 +97,6 @@ type PendingShow = {
   requesterId: string;
   defenderId: string;
   label: "Show" | "Back show";
-};
-
-type ChipRequest = {
-  id: string;
-  playerId: string;
-  playerName: string;
-  chips: 10 | 20;
 };
 
 type TransferDraft = {
@@ -170,6 +167,12 @@ export function normalizeSharedTable(value: unknown): TableState | null {
       ...player,
       hand: Array.isArray(player.hand) ? player.hand : [],
     })),
+    pendingBuyInRequests: Array.isArray(candidate.pendingBuyInRequests)
+      ? candidate.pendingBuyInRequests
+      : [],
+    pendingTransferRequests: Array.isArray(candidate.pendingTransferRequests)
+      ? candidate.pendingTransferRequests
+      : [],
   };
 }
 
@@ -185,7 +188,7 @@ export function GameShell() {
   const [overlay, setOverlay] = useState<Overlay | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [pendingShow, setPendingShow] = useState<PendingShow | null>(null);
-  const [chipRequests, setChipRequests] = useState<ChipRequest[]>([]);
+  const [chipRequests, setChipRequests] = useState<BuyInRequest[]>([]);
   const [temporaryRevealIds, setTemporaryRevealIds] = useState<string[]>([]);
   const [sessionTallyOpen, setSessionTallyOpen] = useState(false);
   const [sessionEnded, setSessionEnded] = useState(false);
@@ -214,6 +217,16 @@ export function GameShell() {
     ? `${table.handNumber}:${table.actionCount}:${table.turnIndex}:${table.phase}`
     : "idle";
   const turnIsPlaying = table?.phase === "playing";
+  const sharedChipRequests = table?.pendingBuyInRequests ?? [];
+  const displayedChipRequests = [
+    ...sharedChipRequests,
+    ...chipRequests.filter(
+      (request) => !sharedChipRequests.some((shared) => shared.id === request.id),
+    ),
+  ];
+  const incomingTransferRequest = table?.pendingTransferRequests?.find(
+    (request) => request.targetId === table.userId,
+  );
   const multiplayerRoomCode = room?.code ?? "";
   const previousPotRef = useRef<number | null>(null);
   const chipMotionSeqRef = useRef(0);
@@ -225,6 +238,8 @@ export function GameShell() {
   const processingActionIdsRef = useRef(new Set<string>());
   const tableRef = useRef<TableState | null>(null);
   const pendingActionRevisionRef = useRef<number | null>(null);
+  const announcedBuyInRequestIdsRef = useRef(new Set<string>());
+  const announcedTransferRequestIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     const savedSession = readActiveRoomSession();
@@ -284,6 +299,43 @@ export function GameShell() {
     setOverlay({ text, tone });
     window.setTimeout(() => setOverlay(null), 2600);
   }, []);
+
+  useEffect(() => {
+    if (!table || room?.hostId !== table.userId) {
+      return;
+    }
+
+    const unseenRequest = (table.pendingBuyInRequests ?? []).find(
+      (request) => !announcedBuyInRequestIdsRef.current.has(request.id),
+    );
+
+    if (!unseenRequest) {
+      return;
+    }
+
+    announcedBuyInRequestIdsRef.current.add(unseenRequest.id);
+    setMenuOpen(true);
+    showOverlay(
+      `${unseenRequest.playerName} requested ${unseenRequest.chips} buy-in chips`,
+      "neutral",
+    );
+  }, [room?.hostId, showOverlay, table]);
+
+  useEffect(() => {
+    if (!incomingTransferRequest) {
+      return;
+    }
+
+    if (announcedTransferRequestIdsRef.current.has(incomingTransferRequest.id)) {
+      return;
+    }
+
+    announcedTransferRequestIdsRef.current.add(incomingTransferRequest.id);
+    showOverlay(
+      `${incomingTransferRequest.requesterName} requested ${incomingTransferRequest.amount} chips`,
+      "neutral",
+    );
+  }, [incomingTransferRequest, showOverlay]);
 
   useEffect(() => {
     if (
@@ -389,6 +441,56 @@ export function GameShell() {
           next = respondToShowRequest(
             current,
             current.pendingShow.requesterId,
+            action.payload.response === "accept" ? "accept" : "decline",
+          );
+        } else if (action.actionType === "buy_in_self") {
+          const chips = Number(action.payload.chips);
+          if (actorId !== room.hostId || (chips !== 10 && chips !== 20)) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "invalid_buy_in" }).catch(() => undefined);
+            continue;
+          }
+          next = buyInChips(current, actorId, chips);
+        } else if (action.actionType === "buy_in_request") {
+          const chips = Number(action.payload.chips);
+          const player = current.players.find((candidate) => candidate.id === actorId);
+          if (!player || (chips !== 10 && chips !== 20)) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "invalid_buy_in_request" }).catch(() => undefined);
+            continue;
+          }
+          next = queueBuyInRequest(current, {
+            id: requestId,
+            playerId: actorId,
+            playerName: player.name,
+            chips,
+          });
+        } else if (action.actionType === "buy_in_response") {
+          if (actorId !== room.hostId) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "not_host" }).catch(() => undefined);
+            continue;
+          }
+          next = resolveBuyInRequest(
+            current,
+            requestId,
+            action.payload.response === "accept" ? "accept" : "decline",
+          );
+        } else if (action.actionType === "transfer_request") {
+          const targetId = String(action.payload.targetId ?? "");
+          const amount = Number(action.payload.amount);
+          const requester = current.players.find((candidate) => candidate.id === actorId);
+          next = requester
+            ? queueTransferRequest(current, {
+                id: requestId,
+                requesterId: actorId,
+                requesterName: requester.name,
+                targetId,
+                amount,
+              })
+            : current;
+        } else if (action.actionType === "transfer_response") {
+          next = resolveTransferRequest(
+            current,
+            requestId,
+            actorId,
             action.payload.response === "accept" ? "accept" : "decline",
           );
         }
@@ -753,7 +855,7 @@ export function GameShell() {
         setIncomingChipRequest({ fromId: bot.id, fromName: bot.name, amount: 4 });
         showOverlay(`${bot.name} requested 4 chips from you`, "neutral");
       } else {
-        const request: ChipRequest = {
+        const request: BuyInRequest = {
           id: `test-buy-in-${chipRequestSeqRef.current}`,
           playerId: bot.id,
           playerName: bot.name,
@@ -842,7 +944,7 @@ export function GameShell() {
       normalBotBuyInTriggerRef.current !== null &&
       chaalCount >= normalBotBuyInTriggerRef.current
     ) {
-      const request: ChipRequest = {
+      const request: BuyInRequest = {
         id: `bot-buy-in-${chipRequestSeqRef.current}`,
         playerId: bot.id,
         playerName: bot.name,
@@ -1084,6 +1186,24 @@ export function GameShell() {
       return;
     }
 
+    if (room?.code && onlineUserId && isSupabaseConfigured()) {
+      const isHostRequest = room.hostId === table.userId;
+      const requestId = `buy-in-${crypto.randomUUID()}`;
+      if (
+        dispatchGameAction(isHostRequest ? "buy_in_self" : "buy_in_request", {
+          chips,
+          requestId,
+        })
+      ) {
+        showOverlay(
+          isHostRequest ? `${chips} chips requested` : `${chips}-chip request sent to owner`,
+          "neutral",
+        );
+        setMenuOpen(false);
+      }
+      return;
+    }
+
     if (room?.hostId === table.userId) {
       setTable((currentTable) =>
         currentTable ? buyInChips(currentTable, currentTable.userId, chips) : currentTable,
@@ -1103,7 +1223,7 @@ export function GameShell() {
       return;
     }
 
-    const request: ChipRequest = {
+    const request: BuyInRequest = {
       id: `chip-request-${chipRequestSeqRef.current}`,
       playerId: player.id,
       playerName: player.name,
@@ -1116,9 +1236,19 @@ export function GameShell() {
   }
 
   function approveChipRequest(requestId: string) {
-    const request = chipRequests.find((currentRequest) => currentRequest.id === requestId);
+    const sharedRequest = sharedChipRequests.find(
+      (currentRequest) => currentRequest.id === requestId,
+    );
+    const request = sharedRequest ?? chipRequests.find(
+      (currentRequest) => currentRequest.id === requestId,
+    );
 
     if (!request) {
+      return;
+    }
+
+    if (sharedRequest && dispatchGameAction("buy_in_response", { requestId, response: "accept" })) {
+      showOverlay(`${request.chips}-chip approval sent`, "good");
       return;
     }
 
@@ -1130,7 +1260,17 @@ export function GameShell() {
   }
 
   function rejectChipRequest(requestId: string) {
-    const request = chipRequests.find((currentRequest) => currentRequest.id === requestId);
+    const sharedRequest = sharedChipRequests.find(
+      (currentRequest) => currentRequest.id === requestId,
+    );
+    const request = sharedRequest ?? chipRequests.find(
+      (currentRequest) => currentRequest.id === requestId,
+    );
+
+    if (sharedRequest && dispatchGameAction("buy_in_response", { requestId, response: "decline" })) {
+      showOverlay(`${request?.playerName ?? "Player"}'s request declined`, "warn");
+      return;
+    }
 
     setChipRequests((requests) => requests.filter((currentRequest) => currentRequest.id !== requestId));
     if (normalBotRequestStageRef.current === "buy-in-pending") {
@@ -1384,6 +1524,27 @@ export function GameShell() {
 
     const target = table.players.find((player) => player.id === transferDraft.targetId);
     const amount = Math.max(1, Math.floor(transferDraft.amount));
+
+    if (!target || target.id === table.userId || target.status === "standing") {
+      showOverlay("Choose another active player", "warn");
+      return;
+    }
+
+    if (room?.code && onlineUserId && isSupabaseConfigured()) {
+      const requestId = `transfer-${crypto.randomUUID()}`;
+      if (
+        dispatchGameAction("transfer_request", {
+          requestId,
+          targetId: target.id,
+          amount,
+        })
+      ) {
+        setTransferDraft(null);
+        showOverlay(`${amount} chips requested from ${target.name}`, "neutral");
+      }
+      return;
+    }
+
     const approved = Math.min(amount, target?.chips ?? 0);
     setTransferDraft(null);
     showOverlay(`${amount} chips requested from ${target?.name ?? "player"}`, "neutral");
@@ -1407,6 +1568,26 @@ export function GameShell() {
         approved > 0 ? "good" : "warn",
       );
     }, 1100);
+  }
+
+  function respondToTransferRequest(approved: boolean) {
+    if (!incomingTransferRequest || actionPending) {
+      return;
+    }
+
+    if (
+      dispatchGameAction("transfer_response", {
+        requestId: incomingTransferRequest.id,
+        response: approved ? "accept" : "decline",
+      })
+    ) {
+      showOverlay(
+        approved
+          ? `${incomingTransferRequest.amount} chips approved`
+          : `${incomingTransferRequest.requesterName}'s request declined`,
+        approved ? "good" : "warn",
+      );
+    }
   }
 
   function readPlayerName() {
@@ -1729,7 +1910,7 @@ export function GameShell() {
               {chipMotion ? <ChipMotionOverlay motion={chipMotion} /> : null}
               <OvalTable
                 center={center}
-                currentPlayerId={table.userId}
+                localPlayerId={table.userId}
                 table={table}
                 temporaryRevealIds={temporaryRevealIds}
                 turnRemainingMs={turnRemainingMs}
@@ -1787,7 +1968,7 @@ export function GameShell() {
         open={menuOpen}
         isHost={isHost}
         table={table}
-        chipRequests={chipRequests}
+        chipRequests={displayedChipRequests}
         currentPlayerId={table.userId}
         onApproveChipRequest={approveChipRequest}
         onRejectChipRequest={rejectChipRequest}
@@ -1806,7 +1987,14 @@ export function GameShell() {
           )
         }
       />
-      {incomingChipRequest ? (
+      {incomingTransferRequest ? (
+        <IncomingChipRequestModal
+          amount={incomingTransferRequest.amount}
+          fromName={incomingTransferRequest.requesterName}
+          onReject={() => respondToTransferRequest(false)}
+          onApprove={() => respondToTransferRequest(true)}
+        />
+      ) : incomingChipRequest ? (
         <IncomingChipRequestModal
           amount={incomingChipRequest.amount}
           fromName={incomingChipRequest.fromName}
@@ -2100,13 +2288,13 @@ function UserPanel({
 
 function OvalTable({
   center,
-  currentPlayerId,
+  localPlayerId,
   table,
   temporaryRevealIds,
   turnRemainingMs,
 }: {
   center: ReturnType<typeof describeCenterCard>;
-  currentPlayerId?: string;
+  localPlayerId?: string;
   table: TableState;
   temporaryRevealIds: string[];
   turnRemainingMs: number;
@@ -2197,13 +2385,13 @@ function OvalTable({
           const privateRevealVisible = Boolean(
             table.privateReveal &&
               table.privateReveal.expiresAt > Date.now() &&
-              table.privateReveal.viewerIds.includes(currentPlayerId ?? "") &&
+              table.privateReveal.viewerIds.includes(localPlayerId ?? "") &&
               table.privateReveal.playerIds.includes(player.id),
           );
 
           return (
         <Seat
-          currentPlayerId={currentPlayerId}
+          localPlayerId={localPlayerId}
           dealer={table.players[table.dealerIndex]?.id === player.id}
           handNumber={table.handNumber}
           isUser={player.id === table.userId}
@@ -2217,7 +2405,9 @@ function OvalTable({
             temporaryRevealIds.includes(player.id) ||
             privateRevealVisible
           }
-          timerActive={currentPlayerId === player.id && table.phase === "playing"}
+          timerActive={
+            table.players[table.turnIndex]?.id === player.id && table.phase === "playing"
+          }
           timerKey={`${table.handNumber}-${table.actionCount}-${table.turnIndex}`}
           turnRemainingMs={turnRemainingMs}
         />
@@ -2355,7 +2545,7 @@ function ChipMotionOverlay({ motion }: { motion: ChipMotion }) {
 }
 
 function Seat({
-  currentPlayerId,
+  localPlayerId,
   dealOrigin,
   dealer,
   handNumber,
@@ -2367,7 +2557,7 @@ function Seat({
   timerKey,
   turnRemainingMs,
 }: {
-  currentPlayerId?: string;
+  localPlayerId?: string;
   dealOrigin: { x: number; y: number };
   dealer: boolean;
   handNumber: number;
@@ -2379,13 +2569,17 @@ function Seat({
   timerKey: string;
   turnRemainingMs: number;
 }) {
-  const current = currentPlayerId === player.id;
+  const current = localPlayerId === player.id;
   const displayedHand = player.hand.length === 3 ? player.hand : HIDDEN_HAND_PLACEHOLDERS;
 
   return (
     <div
       className={`absolute w-[102px] rounded-md border px-1.5 py-1.5 text-center shadow-xl shadow-black/30 backdrop-blur sm:w-[138px] sm:px-2 sm:py-2 ${positionClass} ${
-        current ? "border-[#d2a84b] bg-[#4f3a16]/92" : "border-white/12 bg-[#0b1810]/88"
+        timerActive
+          ? "border-[#f5d77d] bg-[#4f3a16]/92 shadow-[0_0_24px_rgba(245,215,125,0.38)]"
+          : current
+            ? "border-white/35 bg-[#173323]/92"
+            : "border-white/12 bg-[#0b1810]/88"
       }`}
     >
       <div className="relative mx-auto h-10 w-10 sm:h-12 sm:w-12">
@@ -2743,7 +2937,7 @@ function TableMenu({
   sessionEnded = false,
   table,
 }: {
-  chipRequests?: ChipRequest[];
+  chipRequests?: BuyInRequest[];
   currentPlayerId?: string;
   isHost?: boolean;
   onApproveChipRequest?: (requestId: string) => void;
@@ -3376,38 +3570,38 @@ function seatPositionClass(index: number, playerCount: number) {
     ],
     3: [
       "left-1/2 bottom-0 -translate-x-1/2",
-      "left-4 top-1/2 -translate-y-1/2 sm:left-10",
-      "right-4 top-1/2 -translate-y-1/2 sm:right-10",
+      "right-3 top-[20%] sm:right-10",
+      "left-3 top-[20%] sm:left-10",
     ],
     4: [
       "left-1/2 bottom-0 -translate-x-1/2",
-      "left-4 top-1/2 -translate-y-1/2 sm:left-10",
-      "left-1/2 top-0 -translate-x-1/2",
       "right-4 top-1/2 -translate-y-1/2 sm:right-10",
+      "left-1/2 top-0 -translate-x-1/2",
+      "left-4 top-1/2 -translate-y-1/2 sm:left-10",
     ],
     5: [
       "left-1/2 bottom-0 -translate-x-1/2",
-      "left-2 bottom-[26%] sm:left-8",
-      "left-[26%] top-0 -translate-x-1/2",
-      "right-[26%] top-0 translate-x-1/2",
       "right-2 bottom-[26%] sm:right-8",
+      "right-[26%] top-0 translate-x-1/2",
+      "left-[26%] top-0 -translate-x-1/2",
+      "left-2 bottom-[26%] sm:left-8",
     ],
     6: [
       "left-1/2 bottom-0 -translate-x-1/2",
-      "left-2 bottom-[24%] sm:left-8",
-      "left-4 top-[22%] sm:left-12",
-      "left-1/2 top-0 -translate-x-1/2",
-      "right-4 top-[22%] sm:right-12",
       "right-2 bottom-[24%] sm:right-8",
+      "right-4 top-[22%] sm:right-12",
+      "left-1/2 top-0 -translate-x-1/2",
+      "left-4 top-[22%] sm:left-12",
+      "left-2 bottom-[24%] sm:left-8",
     ],
     7: [
       "left-1/2 bottom-0 -translate-x-1/2",
-      "left-2 bottom-[22%] sm:left-6",
-      "left-4 top-[25%] sm:left-12",
-      "left-[35%] top-0 -translate-x-1/2",
-      "right-[35%] top-0 translate-x-1/2",
-      "right-4 top-[25%] sm:right-12",
       "right-2 bottom-[22%] sm:right-6",
+      "right-4 top-[25%] sm:right-12",
+      "right-[35%] top-0 translate-x-1/2",
+      "left-[35%] top-0 -translate-x-1/2",
+      "left-4 top-[25%] sm:left-12",
+      "left-2 bottom-[22%] sm:left-6",
     ],
   };
 
