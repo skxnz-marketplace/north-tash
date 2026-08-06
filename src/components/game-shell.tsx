@@ -126,6 +126,53 @@ type ChipMotion = {
 type CardSvgComponent = (props: SVGProps<SVGSVGElement>) => ReactNode;
 
 const ROOM_PREFIX = "north-tash-room-";
+const ACTIVE_ROOM_KEY = "north-tash-active-room";
+const HIDDEN_HAND_PLACEHOLDERS: Card[] = [
+  { rank: "2", suit: "clubs" },
+  { rank: "3", suit: "clubs" },
+  { rank: "4", suit: "clubs" },
+];
+
+export function normalizeSharedTable(value: unknown): TableState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<TableState>;
+  const validPhase = candidate.phase === "playing" || candidate.phase === "hand-complete";
+
+  if (
+    !validPhase ||
+    typeof candidate.roomCode !== "string" ||
+    !Array.isArray(candidate.players) ||
+    candidate.players.length < AFLATOON_RULES.minPlayers ||
+    !Array.isArray(candidate.centerHistory) ||
+    candidate.centerHistory.length === 0 ||
+    !Number.isInteger(candidate.turnIndex) ||
+    !Number.isInteger(candidate.dealerIndex)
+  ) {
+    return null;
+  }
+
+  return {
+    ...(candidate as TableState),
+    userId: "",
+    revision:
+      typeof candidate.revision === "number" && Number.isFinite(candidate.revision)
+        ? candidate.revision
+        : 0,
+    deck: Array.isArray(candidate.deck) ? candidate.deck : [],
+    log: Array.isArray(candidate.log) ? candidate.log : [],
+    revealedPlayerIds: Array.isArray(candidate.revealedPlayerIds)
+      ? candidate.revealedPlayerIds
+      : [],
+    players: candidate.players.map((player) => ({
+      ...player,
+      hand: Array.isArray(player.hand) ? player.hand : [],
+    })),
+  };
+}
+
 export function GameShell() {
   const [screen, setScreen] = useState<Screen>("landing");
   const [roomMode, setRoomMode] = useState<RoomMode>("create");
@@ -167,6 +214,7 @@ export function GameShell() {
     ? `${table.handNumber}:${table.actionCount}:${table.turnIndex}:${table.phase}`
     : "idle";
   const turnIsPlaying = table?.phase === "playing";
+  const multiplayerRoomCode = room?.code ?? "";
   const previousPotRef = useRef<number | null>(null);
   const chipMotionSeqRef = useRef(0);
   const testRequestStartedRef = useRef(false);
@@ -177,6 +225,56 @@ export function GameShell() {
   const processingActionIdsRef = useRef(new Set<string>());
   const tableRef = useRef<TableState | null>(null);
   const pendingActionRevisionRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const savedSession = readActiveRoomSession();
+
+    if (!savedSession || !isSupabaseConfigured()) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const userId = await withMultiplayerTimeout(
+          ensureAnonymousSession(),
+          "Room reconnect timed out.",
+        );
+
+        if (!userId) {
+          throw new Error("Online room service is unavailable.");
+        }
+
+        const joined = await withMultiplayerTimeout(
+          joinMultiplayerRoom(savedSession.code, {
+            id: `p-${userId}`,
+            name: savedSession.name,
+            chips: savedSession.chips,
+          }),
+          "Room reconnect timed out.",
+        );
+
+        if (cancelled || !joined?.snapshot.room) {
+          return;
+        }
+
+        const restoredRoom = joined.snapshot.room as unknown as RoomState;
+        setOnlineUserId(userId);
+        setPlayerName(savedSession.name);
+        setBuyIn(savedSession.chips);
+        setRoomCode(savedSession.code);
+        setRoom(restoredRoom);
+        setPendingOnlineRoom(restoredRoom);
+        setScreen(joined.snapshot.table ? "table" : "lobby");
+      } catch {
+        clearActiveRoomSession();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     tableRef.current = table;
@@ -199,18 +297,35 @@ export function GameShell() {
     }
   }, [actionPending, table]);
 
-  function dispatchGameAction(actionType: string, payload: Record<string, unknown> = {}) {
+  useEffect(() => {
+    if (!actionPending) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      pendingActionRevisionRef.current = null;
+      setActionPending(false);
+      showOverlay("Action was not acknowledged. Please try again.", "warn");
+    }, 12000);
+
+    return () => window.clearTimeout(timeout);
+  }, [actionPending, showOverlay]);
+
+  const dispatchGameAction = useCallback((
+    actionType: string,
+    payload: Record<string, unknown> = {},
+  ) => {
     if (!table || actionPending) {
       return false;
     }
 
-    if (!room?.code || !onlineUserId || !isSupabaseConfigured()) {
+    if (!multiplayerRoomCode || !onlineUserId || !isSupabaseConfigured()) {
       return false;
     }
 
     setActionPending(true);
     pendingActionRevisionRef.current = table.revision;
-    void submitGameAction(room.code, onlineUserId, {
+    void submitGameAction(multiplayerRoomCode, onlineUserId, {
       actionType,
       payload,
       baseRevision: table.revision,
@@ -220,7 +335,7 @@ export function GameShell() {
       showOverlay(error instanceof Error ? error.message : "Action failed", "warn");
     });
     return true;
-  }
+  }, [actionPending, multiplayerRoomCode, onlineUserId, showOverlay, table]);
 
   useEffect(() => {
     if (!room?.code || !onlineUserId || room.hostId !== currentPlayerId || !table) {
@@ -229,7 +344,14 @@ export function GameShell() {
 
     let cancelled = false;
     const processActions = async () => {
-      const actions = await listPendingGameActions(room.code).catch(() => []);
+      let actions;
+
+      try {
+        actions = await listPendingGameActions(room.code);
+      } catch (error) {
+        showOverlay(error instanceof Error ? error.message : "Action sync failed", "warn");
+        return;
+      }
 
       for (const action of actions) {
         if (cancelled || !action.id || processingActionIdsRef.current.has(action.id)) {
@@ -315,7 +437,7 @@ export function GameShell() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId, table]);
+  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId, showOverlay, table]);
 
   useEffect(() => {
     if (!room?.code) {
@@ -344,7 +466,12 @@ export function GameShell() {
     }
 
     const unsubscribe = subscribeToMultiplayerRoom(room.code, (snapshot) => {
-      const sharedTable = snapshot.table as unknown as TableState | null;
+      const sharedTable = normalizeSharedTable(snapshot.table);
+
+      if (snapshot.table && !sharedTable) {
+        showOverlay("Waiting for a complete table update", "warn");
+        return;
+      }
 
       if (
         sharedTable &&
@@ -357,11 +484,10 @@ export function GameShell() {
       applyingRemoteSnapshotRef.current = true;
       setRoom(snapshot.room as unknown as RoomState);
       if (sharedTable) {
-        const localTable = {
-          ...sharedTable,
-          userId: currentPlayerId,
-          players: sharedTable.players.map((player) => ({ ...player, hand: [] })),
-        };
+        canonicalRevisionRef.current = Math.max(
+          canonicalRevisionRef.current,
+          sharedTable.revision,
+        );
         setPendingShow(
           sharedTable.pendingShow
             ? {
@@ -372,13 +498,50 @@ export function GameShell() {
               }
             : null,
         );
-        setTable(localTable);
+        setTable((currentTable) => ({
+          ...sharedTable,
+          userId: currentPlayerId,
+          players: sharedTable.players.map((player) => {
+            const currentPlayer = currentTable?.players.find(
+              (candidate) => candidate.id === player.id,
+            );
+            const canKeepPrivateHand =
+              currentTable?.handNumber === sharedTable.handNumber &&
+              currentPlayer?.hand.length === 3 &&
+              (player.id === currentPlayerId ||
+                Boolean(currentTable.privateReveal?.playerIds.includes(player.id)));
+
+            return {
+              ...player,
+              hand: canKeepPrivateHand ? currentPlayer.hand : [],
+            };
+          }),
+        }));
         setScreen("table");
 
-        void Promise.all([
-          loadPrivateHand(room.code, onlineUserId ?? ""),
-          loadPrivateReveals(room.code, onlineUserId ?? ""),
-        ])
+        const loadProtectedCards = async () => {
+          let protectedState: [
+            unknown[],
+            Awaited<ReturnType<typeof loadPrivateReveals>>,
+          ] = [[], []];
+
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            protectedState = await Promise.all([
+              loadPrivateHand(room.code, onlineUserId ?? ""),
+              loadPrivateReveals(room.code, onlineUserId ?? ""),
+            ]);
+
+            if (protectedState[0].length === 3) {
+              break;
+            }
+
+            await new Promise((resolve) => window.setTimeout(resolve, 300));
+          }
+
+          return protectedState;
+        };
+
+        void loadProtectedCards()
           .then(([hand, reveals]) => {
             setTable((currentTable) => {
               if (!currentTable || currentTable.revision !== sharedTable.revision) {
@@ -406,7 +569,7 @@ export function GameShell() {
               };
             });
           })
-          .catch(() => undefined);
+          .catch(() => showOverlay("Protected cards are still loading", "warn"));
       } else {
         setTable(null);
       }
@@ -416,7 +579,7 @@ export function GameShell() {
     });
 
     return unsubscribe;
-  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId]);
+  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId, showOverlay]);
 
   useEffect(() => {
     if (!room?.code || !onlineUserId || testRoomScenario) {
@@ -429,21 +592,6 @@ export function GameShell() {
 
     return () => window.clearInterval(heartbeat);
   }, [onlineUserId, room?.code, testRoomScenario]);
-
-  useEffect(() => {
-    if (!room?.code || !onlineUserId || testRoomScenario) {
-      return;
-    }
-
-    const cleanup = () => {
-      void leaveMultiplayerRoom(room.code, onlineUserId, room.hostId === currentPlayerId).catch(
-        () => undefined,
-      );
-    };
-
-    window.addEventListener("pagehide", cleanup);
-    return () => window.removeEventListener("pagehide", cleanup);
-  }, [currentPlayerId, onlineUserId, room?.code, room?.hostId, testRoomScenario]);
 
   useEffect(() => {
     const startAt = table?.startAt;
@@ -499,9 +647,8 @@ export function GameShell() {
       return;
     }
 
-    const revision = Math.max(table.revision, canonicalRevisionRef.current) + 1;
-    canonicalRevisionRef.current = revision;
-    const canonicalTable = { ...table, revision };
+    canonicalRevisionRef.current = Math.max(table.revision, canonicalRevisionRef.current);
+    const canonicalTable = table;
     const timeout = window.setTimeout(() => {
       void Promise.all([
         saveMultiplayerSnapshot(
@@ -554,11 +701,20 @@ export function GameShell() {
     }, 100);
 
     const timeout = window.setTimeout(() => {
-      setTable((currentTable) =>
-        currentTable && canUserAct(currentTable)
-          ? playChaal(currentTable, currentTable.userId)
-          : currentTable,
-      );
+      const currentTable = tableRef.current;
+
+      if (!currentTable || !canUserAct(currentTable)) {
+        return;
+      }
+
+      if (room?.code && onlineUserId && isSupabaseConfigured()) {
+        if (dispatchGameAction("chaal")) {
+          showOverlay("Auto chaal sent", "warn");
+        }
+        return;
+      }
+
+      setTable(playChaal(currentTable, currentTable.userId));
       showOverlay("Auto chaal played", "warn");
     }, duration);
 
@@ -569,8 +725,11 @@ export function GameShell() {
     };
   }, [
     actionPending,
+    dispatchGameAction,
+    onlineUserId,
     pendingFold,
     pendingShow,
+    room?.code,
     sessionEnded,
     showOverlay,
     turnKey,
@@ -832,6 +991,7 @@ export function GameShell() {
       }
 
       saveRoom(nextRoom);
+      saveActiveRoomSession({ code: nextRoom.code, name: player.name, chips: player.chips });
       setPendingOnlineRoom(null);
       setRoom(nextRoom);
       setTable(null);
@@ -901,14 +1061,15 @@ export function GameShell() {
     normalBotBuyInTriggerRef.current = null;
     setIncomingChipRequest(null);
     setChipRequests([]);
-    setTable(
-      createTableFromPlayers({
+    const nextTable = createTableFromPlayers({
         roomCode: room.code,
         userId: currentPlayerId,
         players: room.players,
         startAt: Date.now() + 3300,
-      }),
-    );
+      });
+    nextTable.revision = 1;
+    canonicalRevisionRef.current = nextTable.revision;
+    setTable(nextTable);
     setScreen("table");
   }
 
@@ -1075,6 +1236,7 @@ export function GameShell() {
         () => undefined,
       );
     }
+    clearActiveRoomSession();
     setSessionEnded(true);
     setSessionTallyOpen(true);
     setMenuOpen(false);
@@ -1086,6 +1248,7 @@ export function GameShell() {
         () => undefined,
       );
     }
+    clearActiveRoomSession();
     setTable(null);
     setRoom(null);
     setTestRoomScenario(null);
@@ -1595,7 +1758,14 @@ export function GameShell() {
                 <UserPanel
                   player={userPlayer}
                   center={center}
-                  isCurrent={userCanAct && !actionPending && !pendingShow && !pendingFold && !sessionEnded}
+                  isCurrent={
+                    userPlayer.hand.length === 3 &&
+                    userCanAct &&
+                    !actionPending &&
+                    !pendingShow &&
+                    !pendingFold &&
+                    !sessionEnded
+                  }
                   onBackShow={handleBackShow}
                   onChaal={playUserChaal}
                   onFold={requestFoldConfirmation}
@@ -1846,13 +2016,16 @@ function UserPanel({
   showLabel: string;
   tablePhase: TableState["phase"];
 }) {
+  const handReady = player.hand.length === 3;
   const evaluation = useMemo(
     () =>
-      evaluateHand(player.hand, {
-        mode: center.mode,
-        jokerRanks: center.jokerRanks,
-      }),
-    [center.jokerRanks, center.mode, player.hand],
+      handReady
+        ? evaluateHand(player.hand, {
+            mode: center.mode,
+            jokerRanks: center.jokerRanks,
+          })
+        : null,
+    [center.jokerRanks, center.mode, handReady, player.hand],
   );
 
   return (
@@ -1861,22 +2034,32 @@ function UserPanel({
         <div className="min-w-0">
           <p className="text-xs uppercase text-white/50">Your hand</p>
           <p className="truncate text-sm font-semibold text-white">
-            {evaluation.label} by {evaluation.bestCards.map(formatCard).join(" ")}
+            {evaluation
+              ? `${evaluation.label} by ${evaluation.bestCards.map(formatCard).join(" ")}`
+              : "Loading protected cards..."}
           </p>
         </div>
         <ChipCount player={player} />
       </div>
 
       <div className="mt-3 flex items-center gap-2">
-        {player.hand.map((card) => (
-          <PlayingCard
-            card={card}
-            dealIndex={player.hand.indexOf(card)}
-            dealt
-            flipped
-            key={`${handNumber}-${card.rank}-${card.suit}`}
-          />
-        ))}
+        {handReady
+          ? player.hand.map((card) => (
+              <PlayingCard
+                card={card}
+                dealIndex={player.hand.indexOf(card)}
+                dealt
+                flipped
+                key={`${handNumber}-${card.rank}-${card.suit}`}
+              />
+            ))
+          : [0, 1, 2].map((cardIndex) => (
+              <div
+                aria-hidden="true"
+                className="h-[86px] w-[58px] animate-pulse rounded-md border border-white/15 bg-white/8"
+                key={cardIndex}
+              />
+            ))}
       </div>
 
       {tablePhase === "hand-complete" ? (
@@ -2197,6 +2380,7 @@ function Seat({
   turnRemainingMs: number;
 }) {
   const current = currentPlayerId === player.id;
+  const displayedHand = player.hand.length === 3 ? player.hand : HIDDEN_HAND_PLACEHOLDERS;
 
   return (
     <div
@@ -2222,15 +2406,15 @@ function Seat({
       ) : null}
       {!isUser ? (
         <div className="mt-1 flex justify-center gap-1">
-          {player.hand.map((card, cardIndex) => (
+          {displayedHand.map((card, cardIndex) => (
             <PlayingCard
               card={card}
-              dealIndex={player.hand.length * tableSeatOrder(player.seat) + cardIndex}
+              dealIndex={displayedHand.length * tableSeatOrder(player.seat) + cardIndex}
               dealOrigin={dealOrigin}
               dealt
-              flipped={revealed}
+              flipped={revealed && player.hand.length === 3}
               gsapDeal
-              key={`${handNumber}-${player.id}-${card.rank}-${card.suit}`}
+              key={`${handNumber}-${player.id}-${card.rank}-${card.suit}-${cardIndex}`}
               size="tiny"
             />
           ))}
@@ -3272,6 +3456,49 @@ function readRoom(code: string) {
 
 function saveRoom(room: RoomState) {
   window.localStorage.setItem(roomKey(room.code), JSON.stringify(room));
+}
+
+function readActiveRoomSession() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const rawSession = window.localStorage.getItem(ACTIVE_ROOM_KEY);
+
+  if (!rawSession) {
+    return null;
+  }
+
+  try {
+    const session = JSON.parse(rawSession) as {
+      code?: unknown;
+      name?: unknown;
+      chips?: unknown;
+    };
+
+    if (
+      typeof session.code !== "string" ||
+      !/^\d{3}$/.test(session.code) ||
+      typeof session.name !== "string" ||
+      typeof session.chips !== "number"
+    ) {
+      return null;
+    }
+
+    return { code: session.code, name: session.name, chips: session.chips };
+  } catch {
+    return null;
+  }
+}
+
+function saveActiveRoomSession(session: { code: string; name: string; chips: number }) {
+  window.localStorage.setItem(ACTIVE_ROOM_KEY, JSON.stringify(session));
+}
+
+function clearActiveRoomSession() {
+  if (typeof window !== "undefined") {
+    window.localStorage.removeItem(ACTIVE_ROOM_KEY);
+  }
 }
 
 function parseRoom(rawRoom: string): RoomState | null {
