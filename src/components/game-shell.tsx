@@ -112,14 +112,6 @@ type ChipMotion = {
 type CardSvgComponent = (props: SVGProps<SVGSVGElement>) => ReactNode;
 
 const ROOM_PREFIX = "north-tash-room-";
-const TEST_BOT: LobbyPlayer = {
-  id: "test-bot-1",
-  name: "Test Bot",
-  chips: AFLATOON_RULES.startingChips,
-  isBot: true,
-  isHost: false,
-};
-
 export function GameShell() {
   const [screen, setScreen] = useState<Screen>("landing");
   const [roomMode, setRoomMode] = useState<RoomMode>("create");
@@ -136,6 +128,7 @@ export function GameShell() {
   const [temporaryRevealIds, setTemporaryRevealIds] = useState<string[]>([]);
   const [sessionTallyOpen, setSessionTallyOpen] = useState(false);
   const [sessionEnded, setSessionEnded] = useState(false);
+  const [testModeOpen, setTestModeOpen] = useState(false);
   const [formError, setFormError] = useState("");
   const [transferDraft, setTransferDraft] = useState<TransferDraft | null>(null);
   const [pendingFold, setPendingFold] = useState(false);
@@ -470,7 +463,7 @@ export function GameShell() {
       nextRoom = {
         code: roomCode,
         hostId: player.id,
-        players: [player, TEST_BOT],
+        players: [player],
       };
     } else {
       let onlineRoom: RoomState | null = null;
@@ -517,6 +510,46 @@ export function GameShell() {
     normalBotRequestStageRef.current = "idle";
     normalBotBuyInTriggerRef.current = null;
     setScreen("lobby");
+  }
+
+  function enterTestRoom(scenario: Exclude<TestRoomScenario, null>) {
+    const name = readPlayerName();
+    const botIsHost = scenario === "bot-owner";
+    const bot: LobbyPlayer = {
+      id: botIsHost ? "test-room-bot-owner" : "test-room-bot-player",
+      name: botIsHost ? "Bot Room Owner" : "Bot Buyer",
+      chips: AFLATOON_RULES.startingChips,
+      isBot: true,
+      isHost: botIsHost,
+    };
+    const user: LobbyPlayer = { id: localPlayerId, name, chips: buyIn, isHost: !botIsHost };
+    const roomCode = botIsHost ? "901" : "902";
+    const nextRoom: RoomState = {
+      code: roomCode,
+      hostId: botIsHost ? bot.id : user.id,
+      players: botIsHost ? [bot, user] : [user, bot],
+    };
+
+    setTestModeOpen(false);
+    setTestRoomScenario(scenario);
+    setOnlineUserId(null);
+    testRequestStartedRef.current = false;
+    normalBotRequestStageRef.current = "done";
+    normalBotBuyInTriggerRef.current = null;
+    setRoom(nextRoom);
+    setRoomCode(roomCode);
+    setChipRequests([]);
+    setIncomingChipRequest(null);
+    setSessionEnded(false);
+    setTable(
+      createTableFromPlayers({
+        roomCode,
+        userId: localPlayerId,
+        players: nextRoom.players,
+        seed: botIsHost ? 901 : 902,
+      }),
+    );
+    setScreen("table");
   }
 
   function startHand() {
@@ -878,7 +911,15 @@ export function GameShell() {
             setPlayerName={setPlayerName}
             onCreate={() => showCodeScreen("create")}
             onJoin={() => showCodeScreen("join")}
+            onTestMode={() => setTestModeOpen(true)}
           />
+          {testModeOpen ? (
+            <TestModePanel
+              name={playerName}
+              onBack={() => setTestModeOpen(false)}
+              onSelect={enterTestRoom}
+            />
+          ) : null}
         </section>
       </main>
     );
@@ -1112,15 +1153,15 @@ export function GameShell() {
           </div>
         </header>
 
-        <div className="grid flex-1 gap-4 px-3 py-4 lg:grid-cols-[1fr_310px] lg:px-5">
-          <section className="flex min-h-[720px] flex-col overflow-hidden rounded-md border border-[#2f5c43] bg-[#123823] shadow-2xl shadow-black/35">
+        <div className="grid flex-1 gap-2 px-2 py-2 sm:gap-4 sm:px-3 sm:py-4 lg:grid-cols-[1fr_310px] lg:px-5">
+          <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-[#2f5c43] bg-[#123823] shadow-2xl shadow-black/35 lg:min-h-[720px]">
             <div className="grid grid-cols-3 items-center gap-2 border-b border-white/10 bg-black/25 px-3 py-3">
               <PotMetric chips={table.pot} />
               <Metric label="Turn" value={currentPlayer?.name ?? ""} sub={userCanAct ? "Your move" : "Wait"} />
               <ModeBadge mode={center.mode} />
             </div>
 
-            <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-3 sm:p-4">
+            <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
               <div className="center-chip-ledger relative z-10 mb-2 rounded-md border border-white/10 bg-black/30 px-2 py-2 backdrop-blur">
                 <ChipLedger potChips={table.pot} userPlayer={userPlayer} />
               </div>
@@ -1227,12 +1268,14 @@ function EntryPanel({
   nameInputRef,
   onCreate,
   onJoin,
+  onTestMode,
   playerName,
   setPlayerName,
 }: {
   nameInputRef: React.RefObject<HTMLInputElement | null>;
   onCreate: () => void;
   onJoin: () => void;
+  onTestMode: () => void;
   playerName: string;
   setPlayerName: (name: string) => void;
 }) {
@@ -1252,6 +1295,47 @@ function EntryPanel({
         >
           <Play size={18} />
           Join Room
+        </button>
+      </div>
+      <button
+        className="mt-4 w-full border-t border-white/10 pt-3 text-xs font-semibold uppercase tracking-[0.18em] text-white/40 transition hover:text-[#e2b653]"
+        type="button"
+        onClick={onTestMode}
+      >
+        Test mode
+      </button>
+    </section>
+  );
+}
+
+function TestModePanel({
+  name,
+  onBack,
+  onSelect,
+}: {
+  name: string;
+  onBack: () => void;
+  onSelect: (scenario: Exclude<TestRoomScenario, null>) => void;
+}) {
+  return (
+    <section className="absolute inset-x-5 bottom-7 z-20 rounded-md border border-[#d2a84b]/45 bg-[#171b17]/98 p-4 shadow-2xl shadow-black/70 backdrop-blur sm:inset-x-0 sm:bottom-1/2 sm:translate-y-1/2">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#e2b653]">Separate tools</p>
+          <h2 className="mt-1 text-xl font-black text-white">Test mode</h2>
+          <p className="mt-1 text-sm text-white/55">For chip-request and bot-owner checks only.</p>
+        </div>
+        <button className="text-sm text-white/55" type="button" onClick={onBack}>Close</button>
+      </div>
+      <p className="mt-4 rounded-md border border-white/10 bg-black/20 px-3 py-2 text-sm text-white/65">
+        Player: {name || "Player"}
+      </p>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <button className="h-11 rounded-md border border-[#d2a84b]/40 bg-[#d2a84b]/12 text-sm font-bold text-[#f5d77d]" type="button" onClick={() => onSelect("bot-owner")}>
+          Bot owner test
+        </button>
+        <button className="h-11 rounded-md border border-white/15 bg-white/8 text-sm font-bold text-white/75" type="button" onClick={() => onSelect("player-owner")}>
+          Player owner test
         </button>
       </div>
     </section>
@@ -1506,10 +1590,10 @@ function OvalTable({
   }, [table.actionCount]);
 
   return (
-    <section className="relative mx-auto mb-4 h-[500px] w-full max-w-3xl sm:h-[560px]" ref={tableRef}>
+    <section className="relative mx-auto mb-2 h-[410px] w-full max-w-3xl sm:mb-4 sm:h-[560px]" ref={tableRef}>
       <div className="absolute inset-x-0 top-4 bottom-4 rounded-[48%] border-[10px] border-[#5c3b20] bg-[radial-gradient(ellipse_at_center,#2f8b58_0%,#1d6740_48%,#11402a_100%)] shadow-[inset_0_0_0_3px_rgba(255,255,255,0.08),inset_0_28px_70px_rgba(255,255,255,0.07),0_28px_70px_rgba(0,0,0,0.42)] sm:inset-x-5" />
       <div className="absolute inset-x-6 top-16 bottom-16 rounded-[48%] border border-[#d2a84b]/25 bg-black/10 sm:inset-x-16" />
-      <div className="absolute left-1/2 top-[48%] w-[238px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/28 p-3 text-center shadow-xl shadow-black/25 backdrop-blur sm:w-[288px]">
+      <div className="absolute left-1/2 top-[46%] w-[196px] -translate-x-1/2 -translate-y-1/2 rounded-md border border-white/15 bg-black/28 p-2 text-center shadow-xl shadow-black/25 backdrop-blur sm:top-[48%] sm:w-[288px] sm:p-3">
         <CenterDeck
           actionCount={table.actionCount}
           card={getActiveCenter(table)}
@@ -1697,18 +1781,18 @@ function Seat({
 
   return (
     <div
-      className={`absolute w-[118px] rounded-md border px-2 py-2 text-center shadow-xl shadow-black/30 backdrop-blur sm:w-[138px] ${positionClass} ${
+      className={`absolute w-[102px] rounded-md border px-1.5 py-1.5 text-center shadow-xl shadow-black/30 backdrop-blur sm:w-[138px] sm:px-2 sm:py-2 ${positionClass} ${
         current ? "border-[#d2a84b] bg-[#4f3a16]/92" : "border-white/12 bg-[#0b1810]/88"
       }`}
     >
-      <div className="relative mx-auto h-12 w-12">
+      <div className="relative mx-auto h-10 w-10 sm:h-12 sm:w-12">
         {timerActive ? <TimerRing remainingMs={turnRemainingMs} /> : null}
-        <div className="absolute inset-1 grid place-items-center rounded-full bg-[#f7f3e8] text-sm font-black text-[#162217]">
+        <div className="absolute inset-1 grid place-items-center rounded-full bg-[#f7f3e8] text-xs font-black text-[#162217] sm:text-sm">
           {initials(player.name)}
         </div>
       </div>
       <div className="mt-1 flex items-center justify-center gap-1">
-        <p className="truncate text-sm font-semibold">{player.name}</p>
+        <p className="truncate text-xs font-semibold sm:text-sm">{player.name}</p>
         {dealer ? <DealerBadge /> : null}
       </div>
       <p className="mt-1 text-xs text-white/50">
