@@ -21,6 +21,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "1.51.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -31,7 +32,8 @@
     "react-server-dom-webpack": "^19.2.8",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vinext": "1.0.0-beta.4"
+    "vinext": "1.0.0-beta.4",
+    "vite": "8.2.1"
   },
   "packageManager": "pnpm@10.33.0"
 }
