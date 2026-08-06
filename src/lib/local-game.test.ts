@@ -8,11 +8,14 @@ import {
 } from "./aflatoon.ts";
 import {
   buyInChips,
+  calculatePlayerSettlements,
+  calculateTransferObligations,
   createShowRequest,
   createDeck,
   createLocalTable,
   getActiveCenter,
   getCurrentPlayer,
+  netPlayerSettlements,
   playChaal,
   queueBuyInRequest,
   queueTransferRequest,
@@ -184,6 +187,13 @@ test("player transfers support full or partial whole-chip approval without chang
   assert.equal(next.players[1].transferBalanceChips, -4);
   assert.equal(next.players[0].transferBalanceChips, 4);
   assert.equal(next.players[0].totalBuyInChips, receiver.totalBuyInChips);
+  assert.equal(next.transferLedger?.length, 1);
+  assert.deepEqual(next.transferLedger?.[0], {
+    id: next.transferLedger?.[0].id,
+    fromPlayerId: giver.id,
+    toPlayerId: receiver.id,
+    chips: 4,
+  });
 });
 
 test("buy-in requests persist until the owner resolves them", () => {
@@ -240,6 +250,75 @@ test("personal chip requests cannot target self and only the target can resolve 
   assert.equal(resolved.pendingTransferRequests?.length, 0);
   assert.equal(resolved.players[0].chips, requester.chips + 3);
   assert.equal(resolved.players[1].chips, target.chips - 3);
+  assert.deepEqual(resolved.transferLedger, [
+    {
+      id: "transfer-1",
+      fromPlayerId: target.id,
+      toPlayerId: requester.id,
+      chips: 3,
+    },
+  ]);
+});
+
+test("session settlement says which losing player pays each winning player", () => {
+  const table = createLocalTable({
+    roomCode: "123",
+    userName: "Player 1",
+    botNames: ["Player 2", "Player 3"],
+    seed: 16,
+  });
+  const players = table.players.map((player, index) => ({
+    ...player,
+    chips: [10, 26, 24][index],
+    totalBuyInChips: 20,
+    transferBalanceChips: 0,
+    shortChips: 0,
+  }));
+
+  assert.deepEqual(calculatePlayerSettlements(players), [
+    { fromPlayerId: players[0].id, toPlayerId: players[1].id, chips: 6 },
+    { fromPlayerId: players[0].id, toPlayerId: players[2].id, chips: 4 },
+  ]);
+});
+
+test("reciprocal personal chip requests are netted into one clear obligation", () => {
+  assert.deepEqual(
+    calculateTransferObligations([
+      { id: "one", fromPlayerId: "player-1", toPlayerId: "player-2", chips: 3 },
+      { id: "two", fromPlayerId: "player-2", toPlayerId: "player-1", chips: 1 },
+    ]),
+    [{ fromPlayerId: "player-2", toPlayerId: "player-1", chips: 2 }],
+  );
+});
+
+test("final settlement nets game results against personal chip obligations", () => {
+  assert.deepEqual(
+    netPlayerSettlements([
+      { fromPlayerId: "player-1", toPlayerId: "player-2", chips: 5 },
+      { fromPlayerId: "player-2", toPlayerId: "player-1", chips: 3 },
+    ]),
+    [{ fromPlayerId: "player-1", toPlayerId: "player-2", chips: 2 }],
+  );
+});
+
+test("personal chip request history survives the next hand", () => {
+  let table = createLocalTable({
+    roomCode: "123",
+    userName: "Player 1",
+    botNames: ["Player 2"],
+    seed: 17,
+  });
+  table = transferPlayerChips(table, table.players[1].id, table.players[0].id, 3, 3, "loan-1");
+  table = startNextHand({ ...table, phase: "hand-complete" }, 18);
+
+  assert.deepEqual(table.transferLedger, [
+    {
+      id: "loan-1",
+      fromPlayerId: table.players[1].id,
+      toPlayerId: table.players[0].id,
+      chips: 3,
+    },
+  ]);
 });
 
 test("a third decline request is forced to accept", () => {
