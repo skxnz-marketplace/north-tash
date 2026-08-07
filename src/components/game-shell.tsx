@@ -1577,6 +1577,11 @@ export function GameShell() {
       return;
     }
 
+    if (mode === "TEXAS_HOLDEM" && room.players.length < TEXAS_HOLDEM_RULES.minPlayers) {
+      showOverlay("Poker needs at least 2 players", "warn");
+      return;
+    }
+
     if ((mode === "CLASSIC_FLIPPING" || mode === "FLIPPING_MOFLESS") && room.players.length < 3) {
       showOverlay("Flipping requires at least 3 players", "warn");
       return;
@@ -1588,46 +1593,55 @@ export function GameShell() {
     setChipRequests([]);
     setModePickerOpen(false);
 
-    if (mode === "TEXAS_HOLDEM") {
-      const nextTable = createPokerTableFromRoom({
-        roomCode: room.code,
-        userId: currentPlayerId,
-        players: room.players,
-        dealerIndex: Math.floor(Math.random() * room.players.length),
-        seed: Date.now(),
-      });
-      canonicalRevisionRef.current = nextTable.revision;
-      setTable(nextTable);
-      setScreen("table");
-      return;
-    }
+    try {
+      const tableUserId = room.players.some((player) => player.id === currentPlayerId)
+        ? currentPlayerId
+        : room.hostId;
 
-    if (mode === "CLASSIC_FLIPPING" || mode === "FLIPPING_MOFLESS") {
-      const nextTable = createFlippingTableFromRoom({
-        roomCode: room.code,
-        userId: currentPlayerId,
-        players: room.players,
-        mode,
-        dealerIndex: Math.floor(Math.random() * room.players.length),
-        seed: Date.now(),
-      });
-      canonicalRevisionRef.current = nextTable.revision;
-      setTable(nextTable);
-      setScreen("table");
-      return;
-    }
+      if (mode === "TEXAS_HOLDEM") {
+        const nextTable = createPokerTableFromRoom({
+          roomCode: room.code,
+          userId: tableUserId,
+          players: room.players,
+          dealerIndex: Math.floor(Math.random() * room.players.length),
+          seed: Date.now(),
+        });
+        canonicalRevisionRef.current = nextTable.revision;
+        setTable(nextTable);
+        setScreen("table");
+        return;
+      }
 
-    const nextTable = createTableFromPlayers({
+      if (mode === "CLASSIC_FLIPPING" || mode === "FLIPPING_MOFLESS") {
+        const nextTable = createFlippingTableFromRoom({
+          roomCode: room.code,
+          userId: tableUserId,
+          players: room.players,
+          mode,
+          dealerIndex: Math.floor(Math.random() * room.players.length),
+          seed: Date.now(),
+        });
+        canonicalRevisionRef.current = nextTable.revision;
+        setTable(nextTable);
+        setScreen("table");
+        return;
+      }
+
+      const nextTable = createTableFromPlayers({
         roomCode: room.code,
-        userId: currentPlayerId,
+        userId: tableUserId,
         players: room.players,
         startAt: Date.now() + 3300,
       });
-    nextTable.gameMode = "AFLATOON";
-    nextTable.revision = 1;
-    canonicalRevisionRef.current = nextTable.revision;
-    setTable(nextTable);
-    setScreen("table");
+      nextTable.gameMode = "AFLATOON";
+      nextTable.revision = 1;
+      canonicalRevisionRef.current = nextTable.revision;
+      setTable(nextTable);
+      setScreen("table");
+    } catch (error) {
+      setModePickerOpen(true);
+      showOverlay(error instanceof Error ? error.message : "Could not start this game", "warn");
+    }
   }
 
   function payUserBoot() {
@@ -2901,6 +2915,7 @@ function GameModePicker({
   }
 
   const flippingLocked = playerCount < 3;
+  const pokerLocked = playerCount < TEXAS_HOLDEM_RULES.minPlayers;
 
   return (
     <div className="modal-backdrop fixed inset-0 z-[60] grid place-items-center px-4">
@@ -2930,12 +2945,15 @@ function GameModePicker({
             <span className="text-xs font-semibold text-black/60">Current North Tash mode</span>
           </button>
           <button
-            className="secondary-action flex min-h-16 flex-col items-start justify-center px-4 text-left"
+            className="secondary-action flex min-h-16 flex-col items-start justify-center px-4 text-left disabled:opacity-45"
+            disabled={pokerLocked}
             type="button"
             onClick={() => onSelect("TEXAS_HOLDEM")}
           >
             <span className="text-base font-black text-white">Texas Hold&apos;em</span>
-            <span className="text-xs font-semibold text-white/55">Small blind 1, big blind 2, no-limit betting</span>
+            <span className="text-xs font-semibold text-white/55">
+              {pokerLocked ? "Requires at least 2 players" : "Small blind 1, big blind 2, no-limit betting"}
+            </span>
           </button>
           <button
             className="secondary-action flex min-h-16 flex-col items-start justify-center px-4 text-left disabled:opacity-45"
