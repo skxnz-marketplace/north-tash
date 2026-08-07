@@ -422,7 +422,7 @@ function validateFlippingAction(
   }
 
   if (action.type === "REQUEST_PACK_SHOW" && activeFlippingPlayers(state).length <= 2) {
-    return { ok: false, code: "ILLEGAL_ACTION", message: "Pack Show requires more than two active players." };
+    return { ok: false, code: "ILLEGAL_ACTION", message: "Back Show requires more than two active players." };
   }
 
   return { ok: true };
@@ -525,7 +525,7 @@ function resolveFlippingShow(
   };
 
   if (type === "PACK_SHOW") {
-    return packFlippingPlayer(next, loserId, "Pack Show");
+    return packFlippingPlayer(next, loserId, "Back Show");
   }
 
   requester.publicCards = [...requester.cards];

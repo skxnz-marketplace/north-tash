@@ -496,6 +496,36 @@ function getFlippingEngine(mode: FlippingMode) {
   return mode === "CLASSIC_FLIPPING" ? classicFlippingRulesEngine : flippingMoflessRulesEngine;
 }
 
+function lobbyPlayersFromTable(table: TableState): LobbyPlayer[] {
+  return table.players
+    .filter((player) => player.status !== "standing")
+    .map((player) => ({
+      id: player.id,
+      name: player.name,
+      chips: Math.max(0, player.chips),
+      isBot: player.isBot,
+      isHost: false,
+    }));
+}
+
+function nextDealerForPlayers(table: TableState, players: LobbyPlayer[]) {
+  const currentDealerId = table.players[table.dealerIndex]?.id;
+  const currentIndex = players.findIndex((player) => player.id === currentDealerId);
+
+  return currentIndex >= 0 ? (currentIndex + 1) % players.length : 0;
+}
+
+function previousActiveFlippingPlayerId(flipping: FlippingState, playerId: string) {
+  const activePlayers = flipping.players.filter((player) => player.status === "ACTIVE");
+  const actorIndex = activePlayers.findIndex((player) => player.playerId === playerId);
+
+  if (actorIndex < 0 || activePlayers.length < 2) {
+    return undefined;
+  }
+
+  return activePlayers[(actorIndex - 1 + activePlayers.length) % activePlayers.length]?.playerId;
+}
+
 export function GameShell() {
   const [screen, setScreen] = useState<Screen>("landing");
   const [roomMode, setRoomMode] = useState<RoomMode>("create");
@@ -792,6 +822,88 @@ export function GameShell() {
               reason: error instanceof Error ? error.message : "invalid_poker_action",
             }).catch(() => undefined);
             continue;
+          }
+        } else if (action.actionType === "flipping_back_show_request") {
+          if (
+            (current.gameMode !== "CLASSIC_FLIPPING" && current.gameMode !== "FLIPPING_MOFLESS") ||
+            !current.flipping ||
+            current.pendingShow
+          ) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "invalid_back_show_request" }).catch(() => undefined);
+            continue;
+          }
+          const defenderId = previousActiveFlippingPlayerId(current.flipping, actorId);
+
+          if (!defenderId || current.flipping.currentActorPlayerId !== actorId) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "invalid_back_show_target" }).catch(() => undefined);
+            continue;
+          }
+
+          next = {
+            ...current,
+            pendingShow: {
+              requestId,
+              requesterId: actorId,
+              defenderId,
+              label: "Back show",
+            },
+            log: [
+              {
+                id: `${Date.now()}-flipping-back-show`,
+                text: `${
+                  current.players.find((player) => player.id === actorId)?.name ?? "Player"
+                } requested Back Show.`,
+                tone: "neutral" as const,
+              },
+              ...current.log,
+            ].slice(0, 10),
+          };
+        } else if (action.actionType === "flipping_back_show_response") {
+          if (
+            (current.gameMode !== "CLASSIC_FLIPPING" && current.gameMode !== "FLIPPING_MOFLESS") ||
+            !current.flipping ||
+            !current.pendingShow
+          ) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "invalid_back_show_response" }).catch(() => undefined);
+            continue;
+          }
+          if (current.pendingShow.defenderId !== actorId) {
+            await markGameActionProcessed(action.id, { ok: false, reason: "not_defender" }).catch(() => undefined);
+            continue;
+          }
+          if (action.payload.response === "accept") {
+            try {
+              const transition = getFlippingEngine(current.gameMode).applyAction(
+                current.flipping,
+                current.pendingShow.requesterId,
+                { type: "REQUEST_PACK_SHOW", targetPlayerId: current.pendingShow.defenderId },
+              );
+              next = {
+                ...tableFromFlippingState(current, transition.state),
+                pendingShow: undefined,
+              };
+            } catch (error) {
+              await markGameActionProcessed(action.id, {
+                ok: false,
+                reason: error instanceof Error ? error.message : "invalid_back_show_accept",
+              }).catch(() => undefined);
+              continue;
+            }
+          } else {
+            next = {
+              ...current,
+              pendingShow: undefined,
+              log: [
+                {
+                  id: `${Date.now()}-flipping-back-show-declined`,
+                  text: `${
+                    current.players.find((player) => player.id === actorId)?.name ?? "Player"
+                  } declined Back Show.`,
+                  tone: "warn" as const,
+                },
+                ...current.log,
+              ].slice(0, 10),
+            };
           }
         } else if (action.actionType === "flipping_action") {
           if (
@@ -1700,6 +1812,75 @@ export function GameShell() {
     }
   }
 
+  function startNewRound() {
+    if (!table || !isHost || table.phase !== "hand-complete") {
+      return;
+    }
+
+    setTable((currentTable) => {
+      if (!currentTable || currentTable.phase !== "hand-complete") {
+        return currentTable;
+      }
+
+      if (currentTable.gameMode === "TEXAS_HOLDEM") {
+        const players = lobbyPlayersFromTable(currentTable);
+
+        if (players.length < TEXAS_HOLDEM_RULES.minPlayers) {
+          showOverlay("Poker needs at least 2 players", "warn");
+          return currentTable;
+        }
+
+        const nextTable = createPokerTableFromRoom({
+          roomCode: currentTable.roomCode,
+          userId: currentTable.userId,
+          players,
+          dealerIndex: nextDealerForPlayers(currentTable, players),
+          seed: Date.now(),
+        });
+
+        return {
+          ...nextTable,
+          handNumber: currentTable.handNumber + 1,
+          transferLedger: currentTable.transferLedger,
+          pendingBuyInRequests: currentTable.pendingBuyInRequests,
+          pendingTransferRequests: currentTable.pendingTransferRequests,
+          revision: currentTable.revision + 1,
+        };
+      }
+
+      if (currentTable.gameMode === "CLASSIC_FLIPPING" || currentTable.gameMode === "FLIPPING_MOFLESS") {
+        const players = lobbyPlayersFromTable(currentTable);
+
+        if (players.length < FLIPPING_RULES.minPlayers) {
+          showOverlay("Flipping needs at least 3 players", "warn");
+          return currentTable;
+        }
+
+        const nextTable = createFlippingTableFromRoom({
+          roomCode: currentTable.roomCode,
+          userId: currentTable.userId,
+          players,
+          mode: currentTable.gameMode,
+          dealerIndex: nextDealerForPlayers(currentTable, players),
+          seed: Date.now(),
+        });
+
+        return {
+          ...nextTable,
+          handNumber: currentTable.handNumber + 1,
+          transferLedger: currentTable.transferLedger,
+          pendingBuyInRequests: currentTable.pendingBuyInRequests,
+          pendingTransferRequests: currentTable.pendingTransferRequests,
+          revision: currentTable.revision + 1,
+        };
+      }
+
+      return startNextHand(currentTable);
+    });
+    setMenuOpen(false);
+    showOverlay("New round started", "good");
+  }
+
   function payUserBoot() {
     if (!table || table.phase !== "collecting-boots" || actionPending) {
       return;
@@ -1746,6 +1927,45 @@ export function GameShell() {
 
   function playFlippingAction(action: FlippingAction) {
     if (!table?.flipping || actionPending) {
+      return;
+    }
+
+    if (action.type === "REQUEST_PACK_SHOW") {
+      const defenderId = previousActiveFlippingPlayerId(table.flipping, table.userId);
+
+      if (!defenderId) {
+        showOverlay("Back Show is not available", "warn");
+        return;
+      }
+
+      const requestId = `flipping-back-show-${Date.now()}`;
+
+      if (dispatchGameAction("flipping_back_show_request", { requestId })) {
+        showOverlay("Back Show requested", "neutral");
+        return;
+      }
+
+      setPendingShow({
+        requestId,
+        requesterId: table.userId,
+        defenderId,
+        label: "Back show",
+      });
+      setTable((currentTable) =>
+        currentTable
+          ? {
+              ...currentTable,
+              pendingShow: {
+                requestId,
+                requesterId: table.userId,
+                defenderId,
+                label: "Back show",
+              },
+              revision: currentTable.revision + 1,
+            }
+          : currentTable,
+      );
+      showOverlay("Back Show requested", "neutral");
       return;
     }
 
@@ -2059,6 +2279,69 @@ export function GameShell() {
     }
 
     const request = pendingShow;
+    const isFlippingBackShow =
+      table?.gameMode === "CLASSIC_FLIPPING" || table?.gameMode === "FLIPPING_MOFLESS";
+
+    if (isFlippingBackShow) {
+      if (dispatchGameAction("flipping_back_show_response", { response, requestId: request.requestId })) {
+        setPendingShow(null);
+        showOverlay(
+          response === "accept" ? "Back Show accepted" : "Back Show declined",
+          response === "accept" ? "good" : "warn",
+        );
+        return;
+      }
+
+      setActionPending(true);
+      showOverlay(
+        response === "accept" ? "Back Show accepted" : "Back Show declined",
+        response === "accept" ? "good" : "warn",
+      );
+      window.setTimeout(() => {
+        setTable((currentTable) => {
+          if (
+            !currentTable?.flipping ||
+            (currentTable.gameMode !== "CLASSIC_FLIPPING" && currentTable.gameMode !== "FLIPPING_MOFLESS") ||
+            !currentTable.pendingShow
+          ) {
+            return currentTable;
+          }
+
+          if (response === "decline") {
+            return {
+              ...currentTable,
+              pendingShow: undefined,
+              log: [
+                {
+                  id: `${Date.now()}-flipping-back-show-declined`,
+                  text: `${
+                    currentTable.players.find((player) => player.id === currentTable.userId)?.name ?? "Player"
+                  } declined Back Show.`,
+                  tone: "warn" as const,
+                },
+                ...currentTable.log,
+              ].slice(0, 10),
+              revision: currentTable.revision + 1,
+            };
+          }
+
+          const transition = getFlippingEngine(currentTable.gameMode).applyAction(
+            currentTable.flipping,
+            request.requesterId,
+            { type: "REQUEST_PACK_SHOW", targetPlayerId: request.defenderId },
+          );
+
+          return {
+            ...tableFromFlippingState(currentTable, transition.state),
+            pendingShow: undefined,
+            revision: currentTable.revision + 1,
+          };
+        });
+        setPendingShow(null);
+        setActionPending(false);
+      }, response === "accept" ? 1200 : 650);
+      return;
+    }
 
     if (dispatchGameAction("show_response", { response })) {
       setPendingShow(null);
@@ -2468,6 +2751,28 @@ export function GameShell() {
   const showLabel = activePlayers.length === 2 ? "Show" : "Back Show";
   const isHost = room?.hostId === currentPlayerId;
 
+  if (table.gameMode === "TEXAS_HOLDEM" && !table.poker) {
+    return (
+      <main className="app-shell grid place-items-center px-5 text-center text-white">
+        <section className="surface-panel max-w-sm p-6">
+          <p className="text-xs font-bold uppercase tracking-[0.3em] text-[#d2a84b]">North Tash</p>
+          <h1 className="mt-3 text-2xl font-black">Poker table is syncing</h1>
+          <p className="mt-3 text-sm leading-6 text-white/65">
+            The room is in Poker mode, but this device has not received the Poker hand yet.
+          </p>
+          <div className="mt-5 grid gap-2">
+            <button className="primary-action h-11 font-bold" type="button" onClick={() => window.location.reload()}>
+              Reload Table
+            </button>
+            <button className="secondary-action h-11 font-bold" type="button" onClick={leaveTable}>
+              Back To Lobby
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   if (table.gameMode === "TEXAS_HOLDEM" && table.poker) {
     const pokerPlayer = table.poker.players.find((player) => player.playerId === table.userId);
     const pokerCanAct =
@@ -2520,6 +2825,17 @@ export function GameShell() {
                   turnRemainingMs={turnRemainingMs}
                 />
                 {overlay ? <ActionOverlay overlay={overlay} /> : null}
+                {pendingShow ? (
+                  pendingShow.defenderId === table.userId ? (
+                    <ShowResponseModal
+                      label={pendingShow.label}
+                      requester={table.players.find((player) => player.id === pendingShow.requesterId)}
+                      defender={table.players.find((player) => player.id === pendingShow.defenderId)}
+                      onAccept={() => answerPendingShow("accept")}
+                      onDecline={() => answerPendingShow("decline")}
+                    />
+                  ) : null
+                ) : null}
                 {pokerPlayer ? (
                   <PokerActionPanel
                     actionPending={actionPending}
@@ -2551,6 +2867,7 @@ export function GameShell() {
           onEndSession={endSession}
           sessionEnded={sessionEnded}
           onLeave={leaveTable}
+          onNextHand={isHost ? startNewRound : undefined}
         />
         <SessionTallyModal
           open={sessionTallyOpen}
@@ -2632,6 +2949,17 @@ export function GameShell() {
                   turnRemainingMs={turnRemainingMs}
                 />
                 {overlay ? <ActionOverlay overlay={overlay} /> : null}
+                {pendingShow ? (
+                  pendingShow.defenderId === table.userId ? (
+                    <ShowResponseModal
+                      label={pendingShow.label}
+                      requester={table.players.find((player) => player.id === pendingShow.requesterId)}
+                      defender={table.players.find((player) => player.id === pendingShow.defenderId)}
+                      onAccept={() => answerPendingShow("accept")}
+                      onDecline={() => answerPendingShow("decline")}
+                    />
+                  ) : null
+                ) : null}
                 {table.flipping.phase === "COMPLETE" && table.flipping.lastShow ? (
                   <FlippingResultPanel flipping={table.flipping} />
                 ) : null}
@@ -2666,6 +2994,7 @@ export function GameShell() {
           onEndSession={endSession}
           sessionEnded={sessionEnded}
           onLeave={leaveTable}
+          onNextHand={isHost ? startNewRound : undefined}
         />
         <SessionTallyModal
           open={sessionTallyOpen}
@@ -2818,9 +3147,7 @@ export function GameShell() {
         onEndSession={endSession}
         sessionEnded={sessionEnded}
         onLeave={leaveTable}
-        onNextHand={isHost ? () =>
-          setTable((currentTable) => (currentTable ? startNextHand(currentTable) : currentTable))
-        : undefined}
+        onNextHand={isHost ? startNewRound : undefined}
         onStand={() =>
           setTable((currentTable) =>
             currentTable ? standPlayer(currentTable, currentTable.userId) : currentTable,
@@ -3741,7 +4068,7 @@ function FlippingActionPanel({
           type="button"
           onClick={() => onAction(finalTwo ? { type: "REQUEST_SHOW" } : { type: "REQUEST_PACK_SHOW" })}
         >
-          {finalTwo ? "Show" : "Pack Show"}
+          {finalTwo ? "Show" : "Back Show"}
         </button>
       </div>
     </div>
@@ -4322,13 +4649,15 @@ function ShowResponseModal({
   onDecline: () => void;
   requester?: TablePlayer;
 }) {
+  const displayLabel = label === "Back show" ? "Back Show" : label;
   const declineAvailable =
+    label === "Back show" ||
     (defender?.declinesUsed ?? AFLATOON_RULES.declinesPerHand) <
-    AFLATOON_RULES.declinesPerHand;
+      AFLATOON_RULES.declinesPerHand;
 
   return (
     <div className="modal-surface absolute inset-x-4 top-[56%] z-30 mx-auto max-w-sm -translate-y-1/2 border-[#d2a84b]/45 p-5 text-center">
-      <p className="text-xs uppercase text-[#e2b653]">{label} request</p>
+      <p className="text-xs uppercase text-[#e2b653]">{displayLabel} request</p>
       <h3 className="mt-1 text-xl font-black text-white">
         {requester?.name ?? "Player"} vs {defender?.name ?? "You"}
       </h3>
@@ -4346,7 +4675,11 @@ function ShowResponseModal({
           type="button"
           onClick={onDecline}
         >
-          {declineAvailable ? `Decline (${2 - (defender?.declinesUsed ?? 0)} left)` : "Must Accept"}
+          {declineAvailable
+            ? label === "Back show"
+              ? "Decline"
+              : `Decline (${2 - (defender?.declinesUsed ?? 0)} left)`
+            : "Must Accept"}
         </button>
       </div>
     </div>
