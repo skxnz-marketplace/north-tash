@@ -275,6 +275,7 @@ function createPokerTableFromRoom(input: {
       totalBuyInChips: input.players.find((candidate) => candidate.id === player.playerId)?.chips ?? player.stack,
       transferBalanceChips: 0,
       shortChips: 0,
+      handShortChips: 0,
       declinesUsed: 0,
       status: player.status === "FOLDED" ? "folded" : player.status === "SITTING_OUT" ? "standing" : "active",
       isBot: Boolean(input.players.find((candidate) => candidate.id === player.playerId)?.isBot),
@@ -414,6 +415,7 @@ function createFlippingTableFromRoom(input: {
       totalBuyInChips: player.chips,
       transferBalanceChips: 0,
       shortChips: 0,
+      handShortChips: 0,
       declinesUsed: 0,
       status: "active",
       isBot: Boolean(player.isBot),
@@ -551,6 +553,7 @@ export function GameShell() {
   const [testRoomScenario, setTestRoomScenario] = useState<TestRoomScenario>(null);
   const [incomingChipRequest, setIncomingChipRequest] = useState<IncomingChipRequest | null>(null);
   const [shortfallPrompt, setShortfallPrompt] = useState<ShortfallPrompt | null>(null);
+  const [roundStarting, setRoundStarting] = useState(false);
   const [onlineUserId, setOnlineUserId] = useState<string | null>(null);
   const [joinPending, setJoinPending] = useState(false);
   const [lobbyPending, setLobbyPending] = useState(false);
@@ -565,6 +568,7 @@ export function GameShell() {
   const nameInputRef = useRef<HTMLInputElement>(null);
   const codeInputRef = useRef<HTMLInputElement>(null);
   const chipRequestSeqRef = useRef(1);
+  const roundStartingRef = useRef(false);
   const turnKey = table
     ? `${table.handNumber}:${table.actionCount}:${table.turnIndex}:${table.phase}`
     : "idle";
@@ -648,6 +652,30 @@ export function GameShell() {
     tableRef.current = table;
   }, [table]);
 
+  // The short/zero-chip decision is acknowledged per short episode and persisted
+  // so it survives rerenders, realtime updates and a page refresh within the hand.
+  const readShortAck = useCallback((key: string) => {
+    if (handledShortfallKeysRef.current.has(key)) {
+      return true;
+    }
+
+    try {
+      return window.sessionStorage.getItem(`nt-short-ack:${key}`) === "1";
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const persistShortAck = useCallback((key: string) => {
+    handledShortfallKeysRef.current.add(key);
+
+    try {
+      window.sessionStorage.setItem(`nt-short-ack:${key}`, "1");
+    } catch {
+      // sessionStorage may be unavailable; the in-memory ref still guards the session.
+    }
+  }, []);
+
   useEffect(() => {
     const player = table?.players.find((candidate) => candidate.id === table.userId);
 
@@ -663,15 +691,50 @@ export function GameShell() {
       return;
     }
 
-    const key = `${table.handNumber}:${table.actionCount}:${player.shortChips}`;
+    // Key by the short EPISODE (room + player + hand), not by actionCount, so the
+    // prompt appears once on entry to short and does not reopen on every chaal or
+    // realtime snapshot update. A new hand is a new potential episode.
+    const key = `${table.roomCode}:${table.userId}:${table.handNumber}`;
 
-    if (handledShortfallKeysRef.current.has(key)) {
+    if (handledShortfallKeysRef.current.has(key) || readShortAck(key)) {
+      handledShortfallKeysRef.current.add(key);
       return;
     }
 
     handledShortfallKeysRef.current.add(key);
     setShortfallPrompt({ key, chips: player.shortChips });
-  }, [pendingFold, pendingShow, sessionEnded, table]);
+  }, [pendingFold, pendingShow, readShortAck, sessionEnded, table]);
+
+  // Poker zero-chip recovery popup. Poker tracks chips in poker.stack (not
+  // shortChips) and has no "play on short". Only prompt once the hand is COMPLETE
+  // so a live all-in is never interrupted; a rebuy then applies at the next hand.
+  useEffect(() => {
+    if (
+      !table ||
+      table.gameMode !== "TEXAS_HOLDEM" ||
+      !table.poker ||
+      table.poker.street !== "COMPLETE" ||
+      sessionEnded
+    ) {
+      return;
+    }
+
+    const me = table.poker.players.find((candidate) => candidate.playerId === table.userId);
+
+    if (!me || me.stack > 0) {
+      return;
+    }
+
+    const key = `${table.roomCode}:${table.userId}:poker:${table.poker.handId}`;
+
+    if (handledShortfallKeysRef.current.has(key) || readShortAck(key)) {
+      handledShortfallKeysRef.current.add(key);
+      return;
+    }
+
+    handledShortfallKeysRef.current.add(key);
+    setShortfallPrompt({ key, chips: 0 });
+  }, [readShortAck, sessionEnded, table]);
 
   const showOverlay = useCallback((text: string, tone: Overlay["tone"]) => {
     setOverlay({ text, tone });
@@ -836,6 +899,23 @@ export function GameShell() {
 
           if (!defenderId || current.flipping.currentActorPlayerId !== actorId) {
             await markGameActionProcessed(action.id, { ok: false, reason: "invalid_back_show_target" }).catch(() => undefined);
+            continue;
+          }
+
+          // Authoritatively enforce the seen-versus-seen Back Show rule before a
+          // request modal is ever created, so a manipulated client cannot open a
+          // Back Show while blind or against a blind previous player.
+          const backShowValidation = getFlippingEngine(current.gameMode).validateAction(
+            current.flipping,
+            actorId,
+            { type: "REQUEST_PACK_SHOW", targetPlayerId: defenderId },
+          );
+
+          if (!backShowValidation.ok) {
+            await markGameActionProcessed(action.id, {
+              ok: false,
+              reason: backShowValidation.code ?? "invalid_back_show_request",
+            }).catch(() => undefined);
             continue;
           }
 
@@ -1813,9 +1893,19 @@ export function GameShell() {
   }
 
   function startNewRound() {
-    if (!table || !isHost || table.phase !== "hand-complete") {
+    if (!table || !isHost || table.phase !== "hand-complete" || roundStartingRef.current) {
       return;
     }
+
+    // Idempotency guard: a synchronous ref blocks double-clicks / duplicate
+    // delivery before React state settles, so a single completed hand can only
+    // spawn one new round.
+    roundStartingRef.current = true;
+    setRoundStarting(true);
+    window.setTimeout(() => {
+      roundStartingRef.current = false;
+      setRoundStarting(false);
+    }, 900);
 
     setTable((currentTable) => {
       if (!currentTable || currentTable.phase !== "hand-complete") {
@@ -2531,7 +2621,7 @@ export function GameShell() {
     return (
       <main className="app-shell relative overflow-hidden">
         <PokerBackdrop />
-        <section className="relative mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-7">
+        <section className="relative mx-auto flex min-h-[100svh] w-full max-w-md flex-col justify-center px-5 py-7">
           <BackButton onClick={() => setScreen("landing")} />
           <section className="surface-panel p-5">
             <p className="text-sm font-semibold uppercase text-[#e2b653]">
@@ -2594,7 +2684,7 @@ export function GameShell() {
     return (
       <main className="app-shell relative overflow-hidden">
         <PokerBackdrop />
-        <section className="relative mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-7">
+        <section className="relative mx-auto flex min-h-[100svh] w-full max-w-md flex-col justify-center px-5 py-7">
           <BackButton onClick={() => setScreen("room-code")} />
           <section className="surface-panel p-5">
             <p className="text-sm font-semibold uppercase text-[#e2b653]">Buy-in</p>
@@ -2645,7 +2735,7 @@ export function GameShell() {
     return (
       <main className="app-shell relative overflow-hidden">
         <PokerBackdrop />
-        <section className="relative mx-auto flex min-h-screen w-full max-w-3xl flex-col px-4 py-5">
+        <section className="relative mx-auto flex min-h-[100svh] w-full max-w-3xl flex-col px-4 py-5">
           <header className="flex items-center justify-between">
             <div>
               <p className="text-xs uppercase text-[#e2b653]">Lobby</p>
@@ -2751,6 +2841,54 @@ export function GameShell() {
   const showLabel = activePlayers.length === 2 ? "Show" : "Back Show";
   const isHost = room?.hostId === currentPlayerId;
 
+  // Incoming chip-request and short/zero-chip modals must render in every game
+  // screen (Aflatoon, Poker, Flipping), not only Aflatoon. Poker never offers
+  // "play on short".
+  const requestAndShortfallModals = (
+    <>
+      {incomingTransferRequest ? (
+        <IncomingChipRequestModal
+          amount={incomingTransferRequest.amount}
+          fromName={incomingTransferRequest.requesterName}
+          onReject={() => respondToTransferRequest(false)}
+          onApprove={() => respondToTransferRequest(true)}
+        />
+      ) : incomingChipRequest ? (
+        <IncomingChipRequestModal
+          amount={incomingChipRequest.amount}
+          fromName={incomingChipRequest.fromName}
+          onReject={() => respondToIncomingChipRequest(false)}
+          onApprove={() => respondToIncomingChipRequest(true)}
+        />
+      ) : null}
+      <ShortfallModal
+        chips={shortfallPrompt?.chips ?? 0}
+        open={Boolean(shortfallPrompt)}
+        allowPlayOnShort={table.gameMode !== "TEXAS_HOLDEM"}
+        onContinueShort={() => {
+          if (shortfallPrompt) {
+            persistShortAck(shortfallPrompt.key);
+          }
+          setShortfallPrompt(null);
+        }}
+        onNewBuyIn={(chips) => {
+          if (shortfallPrompt) {
+            persistShortAck(shortfallPrompt.key);
+          }
+          setShortfallPrompt(null);
+          requestChips(chips);
+        }}
+        onRequestPlayers={() => {
+          if (shortfallPrompt) {
+            persistShortAck(shortfallPrompt.key);
+          }
+          setShortfallPrompt(null);
+          openTransferRequest();
+        }}
+      />
+    </>
+  );
+
   if (table.gameMode === "TEXAS_HOLDEM" && !table.poker) {
     return (
       <main className="app-shell grid place-items-center px-5 text-center text-white">
@@ -2780,7 +2918,7 @@ export function GameShell() {
 
     return (
       <main className="app-shell text-[#f7f3e8]">
-        <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
+        <section className="mx-auto flex min-h-[100svh] w-full max-w-6xl flex-col">
           <header className="app-header sticky top-0 z-30 flex items-center justify-between border-b border-white/10 px-4 py-3 sm:px-6">
             <div>
               <p className="text-xs font-semibold uppercase text-[#d2a84b]">North Tash</p>
@@ -2818,7 +2956,7 @@ export function GameShell() {
                 />
               </div>
 
-              <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
+              <div className="relative flex flex-1 flex-col justify-between overflow-y-auto bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:p-4 sm:pb-[max(1rem,env(safe-area-inset-bottom))]">
                 <PokerTableView
                   localPlayerId={table.userId}
                   poker={table.poker}
@@ -2836,7 +2974,13 @@ export function GameShell() {
                     />
                   ) : null
                 ) : null}
-                {pokerPlayer ? (
+                {table.poker.street === "COMPLETE" ? (
+                  <RoundCompleteBanner
+                    isHost={isHost}
+                    pending={roundStarting}
+                    onStartNewRound={startNewRound}
+                  />
+                ) : pokerPlayer ? (
                   <PokerActionPanel
                     actionPending={actionPending}
                     onAction={playPokerAction}
@@ -2884,6 +3028,7 @@ export function GameShell() {
           onChange={setTransferDraft}
           onSubmit={submitTransferRequest}
         />
+        {requestAndShortfallModals}
       </main>
     );
   }
@@ -2901,7 +3046,7 @@ export function GameShell() {
 
     return (
       <main className="app-shell text-[#f7f3e8]">
-        <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
+        <section className="mx-auto flex min-h-[100svh] w-full max-w-6xl flex-col">
           <header className="app-header sticky top-0 z-30 flex items-center justify-between border-b border-white/10 px-4 py-3 sm:px-6">
             <div>
               <p className="text-xs font-semibold uppercase text-[#d2a84b]">North Tash</p>
@@ -2942,7 +3087,7 @@ export function GameShell() {
                 />
               </div>
 
-              <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
+              <div className="relative flex flex-1 flex-col justify-between overflow-y-auto bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:p-4 sm:pb-[max(1rem,env(safe-area-inset-bottom))]">
                 <FlippingTableView
                   localPlayerId={table.userId}
                   flipping={table.flipping}
@@ -2963,7 +3108,13 @@ export function GameShell() {
                 {table.flipping.phase === "COMPLETE" && table.flipping.lastShow ? (
                   <FlippingResultPanel flipping={table.flipping} />
                 ) : null}
-                {flippingPlayer ? (
+                {table.flipping.phase === "COMPLETE" ? (
+                  <RoundCompleteBanner
+                    isHost={isHost}
+                    pending={roundStarting}
+                    onStartNewRound={startNewRound}
+                  />
+                ) : flippingPlayer ? (
                   <FlippingActionPanel
                     actionPending={actionPending}
                     flipping={table.flipping}
@@ -3011,13 +3162,14 @@ export function GameShell() {
           onChange={setTransferDraft}
           onSubmit={submitTransferRequest}
         />
+        {requestAndShortfallModals}
       </main>
     );
   }
 
   return (
     <main className="app-shell text-[#f7f3e8]">
-      <section className="mx-auto flex min-h-screen w-full max-w-6xl flex-col">
+      <section className="mx-auto flex min-h-[100svh] w-full max-w-6xl flex-col">
         <header className="app-header sticky top-0 z-30 flex items-center justify-between border-b border-white/10 px-4 py-3 sm:px-6">
           <div>
             <p className="text-xs font-semibold uppercase text-[#d2a84b]">North Tash</p>
@@ -3052,7 +3204,7 @@ export function GameShell() {
               {center ? <ModeBadge mode={center.mode} /> : <Metric label="Status" value="Ready" sub="Pay boot" />}
             </div>
 
-            <div className="relative flex flex-1 flex-col justify-between overflow-hidden bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 sm:p-4">
+            <div className="relative flex flex-1 flex-col justify-between overflow-y-auto bg-[radial-gradient(circle_at_center,#1b5636_0%,#113824_48%,#0b2418_100%)] p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:p-4 sm:pb-[max(1rem,env(safe-area-inset-bottom))]">
               {countdownRemaining !== null ? (
                 <div className="pointer-events-none absolute inset-0 z-40 grid place-items-center bg-black/45 backdrop-blur-[2px]">
                   <div className="text-center">
@@ -3154,21 +3306,6 @@ export function GameShell() {
           )
         }
       />
-      {incomingTransferRequest ? (
-        <IncomingChipRequestModal
-          amount={incomingTransferRequest.amount}
-          fromName={incomingTransferRequest.requesterName}
-          onReject={() => respondToTransferRequest(false)}
-          onApprove={() => respondToTransferRequest(true)}
-        />
-      ) : incomingChipRequest ? (
-        <IncomingChipRequestModal
-          amount={incomingChipRequest.amount}
-          fromName={incomingChipRequest.fromName}
-          onReject={() => respondToIncomingChipRequest(false)}
-          onApprove={() => respondToIncomingChipRequest(true)}
-        />
-      ) : null}
       <SessionTallyModal
         open={sessionTallyOpen}
         players={table.players}
@@ -3184,19 +3321,7 @@ export function GameShell() {
         onChange={setTransferDraft}
         onSubmit={submitTransferRequest}
       />
-      <ShortfallModal
-        chips={shortfallPrompt?.chips ?? 0}
-        open={Boolean(shortfallPrompt)}
-        onContinueShort={() => setShortfallPrompt(null)}
-        onNewBuyIn={(chips) => {
-          setShortfallPrompt(null);
-          requestChips(chips);
-        }}
-        onRequestPlayers={() => {
-          setShortfallPrompt(null);
-          openTransferRequest();
-        }}
-      />
+      {requestAndShortfallModals}
     </main>
   );
 }
@@ -3990,6 +4115,12 @@ function FlippingActionPanel({
   const canSeeCards = player.visibility === "BLIND" && player.cards.length === 3;
   const modeText = flipping.mode === "FLIPPING_MOFLESS" ? "Lowest hand wins" : "Highest hand wins";
   const finalTwo = flipping.players.filter((candidate) => candidate.status === "ACTIVE").length === 2;
+  // Chaal/Blind and Back Show mirror the authoritative legal-action set so the
+  // UI never offers a move the engine will reject.
+  const isSeen = player.visibility === "SEEN";
+  const canShow = legalActions.actions.some((action) => action.type === "REQUEST_SHOW");
+  const canBackShow = legalActions.actions.some((action) => action.type === "REQUEST_PACK_SHOW");
+  const showLabel = finalTwo ? "Show" : "Back Show";
 
   return (
     <div className="surface-panel-soft p-3 shadow-xl shadow-black/25">
@@ -4052,7 +4183,7 @@ function FlippingActionPanel({
           type="button"
           onClick={() => onAction({ type: "PLACE_CHAAL", amount: selected })}
         >
-          Chaal
+          {isSeen ? "Chaal" : "Blind"}
         </button>
         <button
           className="danger-action h-11 text-xs font-semibold disabled:opacity-45"
@@ -4064,11 +4195,11 @@ function FlippingActionPanel({
         </button>
         <button
           className="secondary-action h-11 text-xs font-semibold disabled:opacity-45"
-          disabled={!canAct}
+          disabled={!canAct || (finalTwo ? !canShow : !canBackShow)}
           type="button"
           onClick={() => onAction(finalTwo ? { type: "REQUEST_SHOW" } : { type: "REQUEST_PACK_SHOW" })}
         >
-          {finalTwo ? "Show" : "Back Show"}
+          {showLabel}
         </button>
       </div>
     </div>
@@ -4998,18 +5129,49 @@ function CardBack({
   );
 }
 
+function RoundCompleteBanner({
+  isHost,
+  pending,
+  onStartNewRound,
+}: {
+  isHost: boolean;
+  pending: boolean;
+  onStartNewRound: () => void;
+}) {
+  return (
+    <div className="surface-panel-soft mt-3 flex flex-col gap-2 p-3 shadow-xl shadow-black/25">
+      <p className="text-sm font-black text-white">Round complete</p>
+      {isHost ? (
+        <button
+          className="primary-action h-11 w-full text-sm font-black disabled:opacity-45"
+          disabled={pending}
+          type="button"
+          onClick={onStartNewRound}
+        >
+          {pending ? "Starting..." : "Start New Round"}
+        </button>
+      ) : (
+        <p className="text-xs font-semibold text-white/60">Waiting for the host to start the next round.</p>
+      )}
+    </div>
+  );
+}
+
 function ShortfallModal({
   chips,
   onContinueShort,
   onNewBuyIn,
   onRequestPlayers,
   open,
+  allowPlayOnShort = true,
 }: {
   chips: number;
   onContinueShort: () => void;
   onNewBuyIn: (chips: 10 | 20) => void;
   onRequestPlayers: () => void;
   open: boolean;
+  // Poker has no "play on short"; it only offers requesting chips or a buy-in.
+  allowPlayOnShort?: boolean;
 }) {
   if (!open) {
     return null;
@@ -5018,10 +5180,18 @@ function ShortfallModal({
   return (
     <div className="modal-backdrop fixed inset-0 z-[70] grid place-items-center px-4">
       <section className="modal-surface w-full max-w-sm p-5">
-        <p className="text-xs font-bold uppercase text-[#f5d77d]">Short balance</p>
-        <h2 className="mt-1 text-2xl font-black text-white">You are short {chips} chip{chips === 1 ? "" : "s"}</h2>
+        <p className="text-xs font-bold uppercase text-[#f5d77d]">
+          {allowPlayOnShort ? "Short balance" : "Out of chips"}
+        </p>
+        <h2 className="mt-1 text-2xl font-black text-white">
+          {allowPlayOnShort
+            ? `You are short ${chips} chip${chips === 1 ? "" : "s"}`
+            : "You have no chips left"}
+        </h2>
         <p className="mt-2 text-sm text-white/65">
-          Choose how you want to continue. Any unpaid short amount stays separately visible in the session tally.
+          {allowPlayOnShort
+            ? "Choose how you want to continue. Any unpaid short amount stays separately visible in the session tally."
+            : "Request chips from another player or take a buy-in to keep playing."}
         </p>
         <button
           className="secondary-action mt-5 flex h-12 w-full items-center justify-center gap-2 px-4 text-sm font-bold"
@@ -5047,13 +5217,15 @@ function ShortfallModal({
             New Buy-in: 20
           </button>
         </div>
-        <button
-          className="mt-2 h-11 w-full text-sm font-semibold text-white/60 transition hover:text-white"
-          type="button"
-          onClick={onContinueShort}
-        >
-          Continue On Short
-        </button>
+        {allowPlayOnShort ? (
+          <button
+            className="mt-2 h-11 w-full text-sm font-semibold text-white/60 transition hover:text-white"
+            type="button"
+            onClick={onContinueShort}
+          >
+            Continue On Short
+          </button>
+        ) : null}
       </section>
     </div>
   );

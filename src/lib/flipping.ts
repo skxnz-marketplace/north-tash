@@ -71,6 +71,12 @@ export type FlippingState = {
   handId: string;
   players: FlippingPlayerState[];
   currentActorPlayerId: string;
+  // Blind play is only allowed for the first two betting rounds. openerPlayerId
+  // anchors round detection (turn returning to the opener ends a round) and
+  // roundNumber counts rounds started; once round 2 ends every active player is
+  // auto-flipped to SEEN.
+  openerPlayerId: string;
+  roundNumber: number;
   currentBlindEquivalent: number;
   activeJokerCards: Card[];
   activeJokerRanks: Rank[];
@@ -144,6 +150,8 @@ const MOFLESS_RANK_VALUE: Record<Rank, number> = {
   K: 13,
 };
 
+// Keys are sorted by MOFLESS_RANK_VALUE (A=1) low-to-high, matching lowSequenceStrength().
+// Strength 1 = weakest sequence (best in Mofless), 13 = strongest (worst in Mofless).
 const LOW_SEQUENCE_STRENGTH = new Map<string, number>([
   ["A-2-3", 1],
   ["2-3-4", 2],
@@ -156,7 +164,8 @@ const LOW_SEQUENCE_STRENGTH = new Map<string, number>([
   ["9-10-J", 9],
   ["10-J-Q", 10],
   ["J-Q-K", 11],
-  ["Q-K-A", 12],
+  ["A-Q-K", 12], // Q-K-A: A has Mofless value 1, so key sorts to A-Q-K
+  ["2-3-5", 13], // Special Aflatoon sequence; mirrors Classic Flipping where 2-3-5 is strongest
 ]);
 
 export function createFlippingDeck(): Card[] {
@@ -322,6 +331,8 @@ function createInitialFlippingState(mode: FlippingMode, input: CreateGameInput):
     handId: `flip-${input.seed ?? Date.now()}`,
     players,
     currentActorPlayerId: opener.playerId,
+    openerPlayerId: opener.playerId,
+    roundNumber: 1,
     currentBlindEquivalent: FLIPPING_RULES.startingBlindEquivalent,
     activeJokerCards,
     activeJokerRanks,
@@ -372,7 +383,7 @@ function getFlippingLegalActions(state: FlippingState, playerId: string): LegalA
 
   if (activeCount === 2) {
     actions.push({ type: "REQUEST_SHOW" });
-  } else if (activeCount > 2) {
+  } else if (activeCount > 2 && canRequestBackShow(state, player)) {
     actions.push({ type: "REQUEST_PACK_SHOW" });
   }
 
@@ -408,6 +419,7 @@ function validateFlippingAction(
     const equivalent = equivalentForAmount(player.visibility, action.amount);
     const legal =
       Number.isInteger(action.amount) &&
+      Number.isInteger(equivalent) &&
       equivalent >= state.currentBlindEquivalent &&
       equivalent <= FLIPPING_RULES.maxBlindEquivalent &&
       action.amount <= player.stack;
@@ -421,8 +433,41 @@ function validateFlippingAction(
     return { ok: false, code: "ILLEGAL_ACTION", message: "Show is only legal with two active players." };
   }
 
-  if (action.type === "REQUEST_PACK_SHOW" && activeFlippingPlayers(state).length <= 2) {
-    return { ok: false, code: "ILLEGAL_ACTION", message: "Back Show requires more than two active players." };
+  if (action.type === "REQUEST_PACK_SHOW") {
+    if (activeFlippingPlayers(state).length <= 2) {
+      return { ok: false, code: "ILLEGAL_ACTION", message: "Back Show requires more than two active players." };
+    }
+
+    // A Back Show is a seen-versus-seen contest against the immediately
+    // previous active player only. Enforce it authoritatively so a manipulated
+    // client cannot show a blind defender, show while blind, or target an
+    // arbitrary non-previous player.
+    if (player.visibility !== "SEEN") {
+      return { ok: false, code: "ILLEGAL_ACTION", message: "Only a seen player can request a Back Show." };
+    }
+
+    const previousId = previousActivePlayerId(state, playerId);
+    const previous = state.players.find((candidate) => candidate.playerId === previousId);
+
+    if (!previous || previous.playerId === playerId) {
+      return { ok: false, code: "ILLEGAL_ACTION", message: "No previous active player to Back Show." };
+    }
+
+    if (previous.visibility !== "SEEN") {
+      return {
+        ok: false,
+        code: "ILLEGAL_ACTION",
+        message: "Back Show is only legal when the previous player is also seen.",
+      };
+    }
+
+    if (action.targetPlayerId && action.targetPlayerId !== previousId) {
+      return {
+        ok: false,
+        code: "ILLEGAL_ACTION",
+        message: "Back Show can only target the immediately previous active player.",
+      };
+    }
   }
 
   return { ok: true };
@@ -458,7 +503,7 @@ function applyFlippingAction(
     next.pot += action.amount;
     next.currentBlindEquivalent = equivalent;
     next.actionLog.unshift(`${player.name} played ${action.amount} chips.`);
-    next.currentActorPlayerId = nextActorAfter(next, playerId);
+    advanceFlippingTurn(next, playerId);
     return completeTransition(next);
   }
 
@@ -478,7 +523,10 @@ function applyFlippingAction(
     return completeTransition(next);
   }
 
-  const defenderId = action.targetPlayerId ?? previousActivePlayerId(next, playerId);
+  // Validation guarantees the only legal Back Show target is the immediately
+  // previous active player, so ignore any client-supplied target and resolve
+  // against that player authoritatively.
+  const defenderId = previousActivePlayerId(next, playerId);
   next = resolveFlippingShow(next, playerId, defenderId, "PACK_SHOW");
   return completeTransition(next);
 }
@@ -563,8 +611,46 @@ function packFlippingPlayer(state: FlippingState, playerId: string, reason = "Pa
     return awardFlippingPot(next, activeAfter.map((candidate) => candidate.playerId), "Last active player wins.");
   }
 
-  next.currentActorPlayerId = nextActorAfter(next, playerId);
+  advanceFlippingTurn(next, playerId);
   return next;
+}
+
+// Advance the turn and enforce the blind-round limit: blind play is allowed for
+// the first two rounds only. A round ends when the turn returns to the opener;
+// the opener is re-anchored if it leaves the hand so counting survives packs.
+function advanceFlippingTurn(state: FlippingState, fromPlayerId: string) {
+  const openerActive = state.players.some(
+    (player) => player.playerId === state.openerPlayerId && player.status === "ACTIVE",
+  );
+
+  if (!openerActive) {
+    const openerIndex = state.players.findIndex((player) => player.playerId === state.openerPlayerId);
+    state.openerPlayerId = state.players[nextActiveIndex(state.players, openerIndex)].playerId;
+  }
+
+  const nextId = nextActorAfter(state, fromPlayerId);
+  state.currentActorPlayerId = nextId;
+
+  if (nextId === state.openerPlayerId) {
+    state.roundNumber += 1;
+
+    // Round 2 has just ended: force every remaining blind player to seen.
+    if (state.roundNumber >= 3) {
+      let flipped = false;
+
+      for (const player of state.players) {
+        if (player.status === "ACTIVE" && player.visibility === "BLIND") {
+          player.visibility = "SEEN";
+          player.lastAction = "Auto seen";
+          flipped = true;
+        }
+      }
+
+      if (flipped) {
+        state.actionLog.unshift("Blind rounds are over. Everyone now plays seen.");
+      }
+    }
+  }
 }
 
 function awardFlippingPot(state: FlippingState, winnerIds: string[], reason: string) {
@@ -709,6 +795,19 @@ function categoryStrength(category: HandCategory) {
 
 function activeFlippingPlayers(state: FlippingState) {
   return state.players.filter((player) => player.status === "ACTIVE");
+}
+
+// A Back Show is only offered to a seen actor whose immediately previous active
+// player is also seen. Mirrors the authoritative check in validateFlippingAction.
+export function canRequestBackShow(state: FlippingState, player: FlippingPlayerState) {
+  if (player.visibility !== "SEEN" || activeFlippingPlayers(state).length <= 2) {
+    return false;
+  }
+
+  const previousId = previousActivePlayerId(state, player.playerId);
+  const previous = state.players.find((candidate) => candidate.playerId === previousId);
+
+  return Boolean(previous && previous.playerId !== player.playerId && previous.visibility === "SEEN");
 }
 
 function amountForVisibility(visibility: FlippingVisibility, blindEquivalent: number) {

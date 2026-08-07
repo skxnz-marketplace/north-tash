@@ -14,6 +14,7 @@ import {
   createShowRequest,
   createDeck,
   createLocalTable,
+  foldPlayer,
   getActiveCenter,
   getCurrentPlayer,
   getOpeningContributionChips,
@@ -461,4 +462,67 @@ test("accepting a queued show limits the temporary reveal to both participants",
   assert.equal(next.privateReveal?.requestId, "show-private");
   assert.deepEqual(next.privateReveal?.viewerIds.sort(), ["you", defenderId].sort());
   assert.deepEqual(next.privateReveal?.playerIds.sort(), ["you", defenderId].sort());
+});
+
+function zeroChips(state: ReturnType<typeof createLocalTable>, playerId: string) {
+  const index = state.players.findIndex((player) => player.id === playerId);
+  state.players[index] = { ...state.players[index], chips: 0 };
+  return state;
+}
+
+test("short increments across successive unpaid chaals in the same hand", () => {
+  let state = createLocalTable({ roomCode: "778", userName: "A", botNames: ["B"], seed: 5 });
+  const shortId = getCurrentPlayer(state).id;
+  state = zeroChips(state, shortId);
+
+  state = playChaal(state, shortId); // short 1
+  state = playChaal(state, getCurrentPlayer(state).id); // opponent acts
+  assert.equal(getCurrentPlayer(state).id, shortId);
+  state = playChaal(state, shortId); // short 2
+
+  const shortPlayer = state.players.find((player) => player.id === shortId);
+  assert.equal(shortPlayer?.handShortChips, 2);
+  assert.equal(shortPlayer?.shortChips, 2);
+});
+
+test("a short player who wins the hand has the current-hand short cleared", () => {
+  let state = createLocalTable({ roomCode: "779", userName: "A", botNames: ["B", "C"], seed: 3 });
+  const shortId = getCurrentPlayer(state).id;
+  state = zeroChips(state, shortId);
+  state = playChaal(state, shortId);
+
+  const before = state.players.find((player) => player.id === shortId);
+  assert.equal(before?.handShortChips, AFLATOON_RULES.fixedChaalChips);
+
+  for (const player of state.players.filter((candidate) => candidate.id !== shortId)) {
+    state = foldPlayer(state, player.id);
+  }
+
+  assert.equal(state.phase, "hand-complete");
+  const winner = state.players.find((player) => player.id === shortId);
+  assert.equal(winner?.handShortChips, 0);
+  assert.equal(winner?.shortChips, 0);
+});
+
+test("a short player who loses the hand keeps the short as a session obligation", () => {
+  let state = createLocalTable({ roomCode: "780", userName: "A", botNames: ["B", "C"], seed: 3 });
+  const shortId = getCurrentPlayer(state).id;
+  state = zeroChips(state, shortId);
+  state = playChaal(state, shortId);
+
+  // The short player folds; a different player wins the hand.
+  state = foldPlayer(state, shortId);
+  const other = state.players.find(
+    (player) => player.id !== shortId && player.status === "active",
+  );
+  const remaining = state.players.filter(
+    (player) => player.status === "active" && player.id !== other?.id,
+  );
+  for (const player of remaining) {
+    state = foldPlayer(state, player.id);
+  }
+
+  assert.equal(state.phase, "hand-complete");
+  const loser = state.players.find((player) => player.id === shortId);
+  assert.equal(loser?.shortChips, AFLATOON_RULES.fixedChaalChips);
 });
