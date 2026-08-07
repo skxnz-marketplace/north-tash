@@ -2458,7 +2458,9 @@ export function GameShell() {
   }
 
   const center =
-    table.phase === "collecting-boots" ? null : describeCenterCard(getActiveCenter(table));
+    table.gameMode === "AFLATOON" && table.phase !== "collecting-boots"
+      ? describeCenterCard(getActiveCenter(table))
+      : null;
   const currentPlayer = getCurrentPlayer(table);
   const userPlayer = table.players.find((player) => player.id === table.userId);
   const activePlayers = getActivePlayers(table);
