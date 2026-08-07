@@ -200,6 +200,105 @@ test("showdown settlement preserves chip total across a split board", () => {
   assert.deepEqual(settlement.winners.map((winner) => winner.playerId), ["p2", "p1"]);
 });
 
+test("all-in players never freeze betting and the hand runs to completion", () => {
+  let state = texasHoldemRulesEngine.createInitialState({
+    roomCode: "205",
+    seed: 7,
+    dealerIndex: 0,
+    players: [
+      { id: "p1", name: "P1", chips: 20 },
+      { id: "p2", name: "P2", chips: 8 },
+      { id: "p3", name: "P3", chips: 20 },
+    ],
+  });
+  const startingChips = 48;
+  let sawAllIn = false;
+  let guard = 0;
+
+  while (state.street !== "COMPLETE") {
+    if ((guard += 1) > 200) {
+      throw new Error("Betting never progressed - all-in freeze.");
+    }
+
+    const actorId = state.currentActorPlayerId;
+    // A hand that is not COMPLETE must always have an ACTIVE actor to move on;
+    // pointing at an all-in/folded seat (or null) is the freeze bug.
+    assert.notEqual(actorId, null);
+    const actor = state.players.find((player) => player.playerId === actorId);
+    assert.equal(actor?.status, "ACTIVE");
+
+    const legal = texasHoldemRulesEngine.getLegalActions(state, actorId!).actions.map((a) => a.type);
+    assert.equal(legal.length > 0, true);
+
+    const choice = legal.includes("ALL_IN")
+      ? { type: "ALL_IN" as const }
+      : legal.includes("CALL")
+        ? { type: "CALL" as const }
+        : legal.includes("CHECK")
+          ? { type: "CHECK" as const }
+          : { type: "FOLD" as const };
+
+    if (choice.type === "ALL_IN") {
+      sawAllIn = true;
+    }
+
+    state = texasHoldemRulesEngine.applyAction(state, actorId!, choice).state;
+  }
+
+  assert.equal(state.street, "COMPLETE");
+  assert.equal(sawAllIn, true);
+  assert.ok(state.winners && state.winners.length > 0);
+  assert.equal(
+    state.players.reduce((sum, player) => sum + player.stack, 0),
+    startingChips,
+  );
+});
+
+test("an all-in short stack is skipped while the remaining players keep betting", () => {
+  let state = texasHoldemRulesEngine.createInitialState({
+    roomCode: "206",
+    seed: 11,
+    dealerIndex: 0,
+    players: [
+      { id: "p1", name: "P1", chips: 30 },
+      { id: "p2", name: "P2", chips: 4 },
+      { id: "p3", name: "P3", chips: 30 },
+    ],
+  });
+
+  // Drive p2 all-in; from then on p2 must never be asked to act again.
+  let guard = 0;
+  let p2WentAllIn = false;
+
+  while (state.street !== "COMPLETE") {
+    if ((guard += 1) > 200) {
+      throw new Error("Betting never progressed - all-in freeze.");
+    }
+
+    const actorId = state.currentActorPlayerId!;
+    const p2 = state.players.find((player) => player.playerId === "p2");
+
+    if (p2?.status === "ALL_IN") {
+      p2WentAllIn = true;
+      assert.notEqual(actorId, "p2");
+    }
+
+    const legal = texasHoldemRulesEngine.getLegalActions(state, actorId).actions.map((a) => a.type);
+    const choice =
+      actorId === "p2" && legal.includes("ALL_IN")
+        ? { type: "ALL_IN" as const }
+        : legal.includes("CALL")
+          ? { type: "CALL" as const }
+          : legal.includes("CHECK")
+            ? { type: "CHECK" as const }
+            : { type: "FOLD" as const };
+    state = texasHoldemRulesEngine.applyAction(state, actorId, choice).state;
+  }
+
+  assert.equal(p2WentAllIn, true);
+  assert.equal(state.street, "COMPLETE");
+});
+
 function pokerPlayer(
   playerId: string,
   seatIndex: number,

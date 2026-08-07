@@ -22,7 +22,11 @@ export interface TablePlayer {
   chips: number;
   totalBuyInChips: number;
   transferBalanceChips: number;
+  // shortChips is the running session short (a debt against the table). handShortChips
+  // is only the short incurred in the current hand; it clears if the same player wins
+  // that hand, since the pot they win covers their own shortfall.
   shortChips: number;
+  handShortChips: number;
   declinesUsed: number;
   status: PlayerStatus;
   isBot: boolean;
@@ -141,6 +145,7 @@ export function createLocalTable(input: {
         index === 0 ? input.startingChips ?? AFLATOON_RULES.startingChips : AFLATOON_RULES.startingChips,
       transferBalanceChips: 0,
     shortChips: 0,
+    handShortChips: 0,
     declinesUsed: 0,
     status: "active",
     isBot: index !== 0,
@@ -182,6 +187,7 @@ export function createTableFromPlayers(input: {
       totalBuyInChips: player.chips,
       transferBalanceChips: 0,
       shortChips: 0,
+      handShortChips: 0,
       declinesUsed: 0,
       status: "active",
       isBot: player.isBot ?? false,
@@ -222,6 +228,7 @@ function prepareNewHand(input: {
     ...player,
     hand: [],
     declinesUsed: 0,
+    handShortChips: 0,
     status: player.status === "standing" ? "standing" : "active",
   }));
   const dealerIndex = clampSeatIndex(input.dealerIndex, players);
@@ -283,6 +290,7 @@ export function dealNewHand(input: {
       ...player,
       hand,
       declinesUsed: 0,
+      handShortChips: 0,
       status: player.status === "standing" ? "standing" : "active",
     };
   });
@@ -931,6 +939,7 @@ export function startNextHand(state: TableState, seed = Date.now()) {
       ...player,
       hand: [],
       declinesUsed: 0,
+      handShortChips: 0,
       status: player.status === "standing" ? "standing" : "active",
     })),
     dealerIndex: nextDealer,
@@ -1049,6 +1058,12 @@ function awardPot(state: TableState, winnerIds: string[], reason: string): Table
     if (winner) {
       winner.chips += share;
       winner.status = "active";
+      // The winner reclaims the pot, so any short they took on THIS hand is
+      // covered and must not survive as a session debt to an opponent.
+      if (winner.handShortChips > 0) {
+        winner.shortChips = Math.max(0, winner.shortChips - winner.handShortChips);
+        winner.handShortChips = 0;
+      }
     }
   }
 
@@ -1094,6 +1109,7 @@ function chargePlayer(player: TablePlayer, chips: number) {
   const short = chips - paid;
   player.chips -= paid;
   player.shortChips += short;
+  player.handShortChips += short;
   return chips;
 }
 
