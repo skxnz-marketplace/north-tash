@@ -324,6 +324,56 @@ function tableFromPokerState(current: TableState, poker: TexasHoldemState): Tabl
   };
 }
 
+function mergePokerSnapshotForClient(
+  sharedPoker: TexasHoldemState | undefined,
+  currentPoker: TexasHoldemState | undefined,
+): TexasHoldemState | undefined {
+  if (!sharedPoker) {
+    return undefined;
+  }
+
+  if (!currentPoker || currentPoker.handId !== sharedPoker.handId) {
+    return {
+      ...sharedPoker,
+      communityCards: Array.isArray(sharedPoker.communityCards) ? sharedPoker.communityCards : [],
+      burnCards: Array.isArray(sharedPoker.burnCards) ? sharedPoker.burnCards : [],
+      deck: Array.isArray(sharedPoker.deck) ? sharedPoker.deck : [],
+      players: Array.isArray(sharedPoker.players)
+        ? sharedPoker.players.map((player) => ({
+            ...player,
+            holeCards: Array.isArray(player.holeCards) ? player.holeCards : [],
+          }))
+        : [],
+      pots: Array.isArray(sharedPoker.pots) ? sharedPoker.pots : [],
+      events: Array.isArray(sharedPoker.events) ? sharedPoker.events : [],
+    };
+  }
+
+  return {
+    ...sharedPoker,
+    communityCards: Array.isArray(sharedPoker.communityCards) ? sharedPoker.communityCards : [],
+    burnCards:
+      Array.isArray(sharedPoker.burnCards) && sharedPoker.burnCards.length
+        ? sharedPoker.burnCards
+        : currentPoker.burnCards,
+    deck:
+      Array.isArray(sharedPoker.deck) && sharedPoker.deck.length
+        ? sharedPoker.deck
+        : currentPoker.deck,
+    players: (Array.isArray(sharedPoker.players) ? sharedPoker.players : []).map((player) => {
+      const currentPlayer = currentPoker.players.find((candidate) => candidate.playerId === player.playerId);
+      const sharedHoleCards = Array.isArray(player.holeCards) ? player.holeCards : [];
+
+      return {
+        ...player,
+        holeCards: sharedHoleCards.length ? sharedHoleCards : currentPlayer?.holeCards ?? [],
+      };
+    }),
+    pots: Array.isArray(sharedPoker.pots) ? sharedPoker.pots : currentPoker.pots,
+    events: Array.isArray(sharedPoker.events) ? sharedPoker.events : currentPoker.events,
+  };
+}
+
 function createFlippingTableFromRoom(input: {
   roomCode: string;
   userId: string;
@@ -949,25 +999,30 @@ export function GameShell() {
               }
             : null,
         );
-        setTable((currentTable) => ({
-          ...sharedTable,
-          userId: currentPlayerId,
-          players: sharedTable.players.map((player) => {
-            const currentPlayer = currentTable?.players.find(
-              (candidate) => candidate.id === player.id,
-            );
-            const canKeepPrivateHand =
-              currentTable?.handNumber === sharedTable.handNumber &&
-              currentPlayer?.hand.length === (sharedTable.gameMode === "TEXAS_HOLDEM" ? 2 : 3) &&
-              (player.id === currentPlayerId ||
-                Boolean(currentTable.privateReveal?.playerIds.includes(player.id)));
+        setTable((currentTable) => {
+          const nextPoker = mergePokerSnapshotForClient(sharedTable.poker, currentTable?.poker);
 
-            return {
-              ...player,
-              hand: canKeepPrivateHand ? currentPlayer.hand : [],
-            };
-          }),
-        }));
+          return {
+            ...sharedTable,
+            userId: currentPlayerId,
+            poker: nextPoker,
+            players: sharedTable.players.map((player) => {
+              const currentPlayer = currentTable?.players.find(
+                (candidate) => candidate.id === player.id,
+              );
+              const canKeepPrivateHand =
+                currentTable?.handNumber === sharedTable.handNumber &&
+                currentPlayer?.hand.length === (sharedTable.gameMode === "TEXAS_HOLDEM" ? 2 : 3) &&
+                (player.id === currentPlayerId ||
+                  Boolean(currentTable.privateReveal?.playerIds.includes(player.id)));
+
+              return {
+                ...player,
+                hand: canKeepPrivateHand ? currentPlayer.hand : [],
+              };
+            }),
+          };
+        });
         setScreen("table");
 
         const loadProtectedCards = async () => {
