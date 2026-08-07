@@ -16,6 +16,8 @@ import {
   createLocalTable,
   getActiveCenter,
   getCurrentPlayer,
+  getOpeningContributionChips,
+  getOpeningPlayerId,
   netPlayerSettlements,
   payBoot,
   playChaal,
@@ -77,6 +79,8 @@ test("all players pay boots before a hand deals and heads-up starts with a 5-chi
   assert.equal(table.phase, "collecting-boots");
   assert.equal(table.pot, 0);
   assert.equal(table.players.every((player) => player.hand.length === 0), true);
+  assert.equal(getOpeningPlayerId(table), "two");
+  assert.deepEqual(table.players.map((player) => getOpeningContributionChips(table, player.id)), [2, 3]);
 
   table = payBoot(table, "one", 0);
   assert.equal(table.phase, "collecting-boots");

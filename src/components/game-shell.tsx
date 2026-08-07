@@ -79,6 +79,7 @@ import {
   getActiveCenter,
   getActivePlayers,
   getCurrentPlayer,
+  getOpeningContributionChips,
   makeRoomCode,
   netPlayerSettlements,
   payBoot,
@@ -3761,6 +3762,7 @@ function BootCollectionPanel({
 }) {
   const pendingIds = new Set(table.pendingBootPlayerIds ?? []);
   const userNeedsToPay = pendingIds.has(table.userId);
+  const userBootAmount = getOpeningContributionChips(table, table.userId);
 
   return (
     <div className="absolute inset-0 z-20 grid place-items-center px-4">
@@ -3775,6 +3777,7 @@ function BootCollectionPanel({
             .filter((player) => player.status === "active")
             .map((player) => {
               const paid = !pendingIds.has(player.id);
+              const amount = getOpeningContributionChips(table, player.id);
 
               return (
                 <div
@@ -3782,8 +3785,13 @@ function BootCollectionPanel({
                   key={player.id}
                 >
                   <span className="truncate font-semibold text-white">{player.name}</span>
-                  <span className={paid ? "font-bold text-[#f5d77d]" : "text-white/45"}>
-                    {paid ? "Paid" : "Waiting"}
+                  <span className="text-right">
+                    <span className="block text-[11px] font-bold uppercase tracking-[0.12em] text-white/45">
+                      {amount} chips
+                    </span>
+                    <span className={paid ? "font-bold text-[#f5d77d]" : "text-white/45"}>
+                      {paid ? "Paid" : "Waiting"}
+                    </span>
                   </span>
                 </div>
               );
@@ -3796,7 +3804,7 @@ function BootCollectionPanel({
             type="button"
             onClick={onPayBoot}
           >
-            Put {AFLATOON_RULES.bootChips} Chips In Pot
+            Put {userBootAmount} Chips In Pot
           </button>
         ) : (
           <p className="mt-4 text-sm font-semibold text-[#f5d77d]">Your boot is in. Waiting for the table.</p>
