@@ -4628,7 +4628,7 @@ function PlayingCard({
           <BackAsset height="100%" width="100%" />
         </div>
         <div className="card-face card-real-face">
-          <CardAsset height="100%" width="100%" />
+          {CardAsset ? <CardAsset height="100%" width="100%" /> : <BackAsset height="100%" width="100%" />}
         </div>
       </div>
     </div>
