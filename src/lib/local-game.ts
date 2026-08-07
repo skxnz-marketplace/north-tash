@@ -384,6 +384,30 @@ export function payBoot(state: TableState, playerId: string, startAt?: number): 
   });
 }
 
+export function getOpeningPlayerId(state: TableState) {
+  const activePlayers = state.players.filter((player) => player.status === "active");
+
+  if (!activePlayers.length) {
+    return undefined;
+  }
+
+  for (let offset = 1; offset <= state.players.length; offset += 1) {
+    const player = state.players[(state.dealerIndex + offset) % state.players.length];
+
+    if (player?.status === "active") {
+      return player.id;
+    }
+  }
+
+  return undefined;
+}
+
+export function getOpeningContributionChips(state: TableState, playerId: string) {
+  return getOpeningPlayerId(state) === playerId
+    ? AFLATOON_RULES.openingChaalChips
+    : AFLATOON_RULES.bootChips;
+}
+
 export function getActiveCenter(state: TableState) {
   return state.centerHistory[state.centerHistory.length - 1];
 }
